@@ -52,6 +52,7 @@ import com.ulak.tv.data.favoriteKey
 import com.ulak.tv.data.model.Channel
 import com.ulak.tv.data.xtream.XtreamProfileStore
 import com.ulak.tv.data.xtream.XtreamRepository
+import com.ulak.tv.data.xtream.TsPsiAnalyzer
 import com.ulak.tv.update.GitHubUpdateManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -298,7 +299,7 @@ private fun Header(profileName: String?) {
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(profileName ?: "Profil yok", color = if (profileName != null) Color.White else Muted, fontSize = 13.sp)
-            Text("v0.3.1.1", color = Muted, fontSize = 12.sp)
+            Text("v0.3.2", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -1111,6 +1112,8 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     var smartDecision by remember { mutableStateOf("Analiz ediliyor") }
     var firstFrameRendered by remember { mutableStateOf(false) }
     var vlcTriedForCandidate by remember { mutableStateOf(false) }
+    var psiAnalysis by remember { mutableStateOf<TsPsiAnalyzer.Analysis?>(null) }
+    var psiStatus by remember { mutableStateOf("Bekleniyor") }
     val playerScope = rememberCoroutineScope()
 
     // Keep the default ExoPlayer renderer/buffer behavior, but use an HTTP
@@ -1118,7 +1121,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     // generic/empty user agents even when the account itself is valid.
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.0")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.2")
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(
                 mapOf(
@@ -1184,6 +1187,37 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         }
     }
 
+    fun analyzePsi(url: String, generation: Int) {
+        psiAnalysis = null
+        psiStatus = "PAT/PMT analiz ediliyor…"
+        playerScope.launch {
+            TsPsiAnalyzer.analyze(url)
+                .onSuccess { analysis ->
+                    if (generation != playbackGeneration || activeUrl != url) return@onSuccess
+                    psiAnalysis = analysis
+                    psiStatus = when {
+                        analysis.pmtPid == null -> "PMT bulunamadı"
+                        analysis.audioStreams.isNotEmpty() -> "Ses PID var"
+                        else -> "Ses PID yok"
+                    }
+                    smartDecision = when {
+                        analysis.audioStreams.isNotEmpty() -> "PMT'de ses var • Media3 algılamıyor"
+                        analysis.pmtPid != null -> "PMT'de ses PID yok • kaynak sessiz"
+                        else -> "PSI/PMT çözülemedi • kaynak incelenemedi"
+                    }
+                    attemptLog = attemptLog + "PSI: ${analysis.note}"
+                    showOverlay()
+                }
+                .onFailure { error ->
+                    if (generation != playbackGeneration || activeUrl != url) return@onFailure
+                    psiAnalysis = null
+                    psiStatus = "Analiz hatası"
+                    attemptLog = attemptLog + "PSI: ${error.message ?: error.javaClass.simpleName}"
+                    showOverlay()
+                }
+        }
+    }
+
     fun playUrl(url: String) {
         playbackGeneration++
         if (useVlc) {
@@ -1196,6 +1230,8 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         smartDecision = "ExoPlayer ile analiz ediliyor"
         firstFrameRendered = false
         vlcTriedForCandidate = false
+        psiAnalysis = null
+        psiStatus = "Bekleniyor"
         activeUrl = url
         playbackError = null
         status = "Yayın hazırlanıyor…"
@@ -1339,6 +1375,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                                 audioInfo = "Ses: yayın akışı yok / algılanmadı"
                                 playbackError = null
                                 attemptLog = attemptLog + "${streamType(urlAtReady)}: $reason • VLC güvenlik nedeniyle denenmedi"
+                                analyzePsi(urlAtReady, generationAtReady)
                                 showOverlay()
                             }
                         }
@@ -1442,7 +1479,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             val media = Media(libVlc, Uri.parse(activeUrl)).apply {
                                 setHWDecoderEnabled(true, false)
                                 addOption(":network-caching=1500")
-                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.0")
+                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.2")
                             }
                             vlcPlayer.media = media
                             media.release()
@@ -1559,11 +1596,28 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                         TechnicalLine("Codec", detectedVideoCodec)
                         TechnicalLine("Ses", audioInfo.removePrefix("Ses: "))
                         TechnicalLine("Audio track", if (useVlc) "VLC motorunda" else if (player.audioFormat != null) "1 • var" else "0 • yok")
+                        TechnicalLine("PSI / PMT", psiStatus)
+                        psiAnalysis?.let { psi ->
+                            TechnicalLine("PMT PID", psi.pmtPid?.toString() ?: "bulunamadı")
+                            TechnicalLine(
+                                "Video PID",
+                                psi.videoStreams.take(2).joinToString(" • ") { "${it.pid} ${it.codec}" }.ifBlank { "bulunamadı" }
+                            )
+                            TechnicalLine(
+                                "Audio PID",
+                                psi.audioStreams.take(3).joinToString(" • ") { "${it.pid} ${it.codec}" }.ifBlank { "BULUNAMADI" }
+                            )
+                            TechnicalLine("TS kaynak", psi.sourceKind)
+                        }
                         TechnicalLine("Yayın", streamType(activeUrl))
                         TechnicalLine("Motor", if (useVlc) "LibVLC" else "Media3 / ExoPlayer")
                         TechnicalLine("Akıllı seçim", smartDecision)
                         TechnicalLine("Durum", status)
                         TechnicalLine("Yol", "${candidateIndex + 1}/${candidates.size}")
+                        psiAnalysis?.let { psi ->
+                            Text("RAW ses çözümleme", color = Muted, fontSize = 10.sp)
+                            Text(psi.note, color = Color(0xFFCFD3D8), fontSize = 9.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        }
                         if (attemptLog.isNotEmpty()) {
                             Text("Son tanılama", color = Muted, fontSize = 10.sp)
                             Text(attemptLog.takeLast(2).joinToString("\n"), color = Color(0xFFCFD3D8), fontSize = 9.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
