@@ -26,11 +26,12 @@ object XtreamRepository {
             val urls = (listOf(channel.streamUrl) + channel.alternateStreamUrls).distinct()
             urls.mapIndexed { index, url ->
                 val label = when {
+                    channel.directSource != null && url == channel.directSource -> "direct_source"
                     url.contains(".m3u8", true) && url.contains("/live/") -> "HLS /live"
                     url.contains(".m3u8", true) -> "HLS rewrite"
                     url.contains(".ts", true) && url.contains("/live/") -> "TS /live"
                     url.contains(".ts", true) -> "TS rewrite"
-                    index == 0 -> "direct_source"
+                    index == 0 -> "birincil kaynak"
                     else -> "Kaynak ${index + 1}"
                 }
                 probeUrl(label, url)
@@ -46,7 +47,7 @@ object XtreamRepository {
                 readTimeout = 10_000
                 requestMethod = "GET"
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "ULAK/0.2.9 AndroidTV")
+                setRequestProperty("User-Agent", "ULAK/0.3.0 AndroidTV")
                 setRequestProperty("Accept", "*/*")
                 setRequestProperty("Connection", "keep-alive")
                 setRequestProperty("Range", "bytes=0-2047")
@@ -142,8 +143,24 @@ object XtreamRepository {
                 if (streamId <= 0) continue
 
                 val categoryId = item.optString("category_id")
-                val directSource = item.optString("direct_source").takeIf {
+                val directSourceRaw = item.optString("direct_source")
+                val directSource = directSourceRaw.takeIf {
                     it.startsWith("http://") || it.startsWith("https://")
+                }
+                val xtreamStreamType = item.optString("stream_type").takeIf { it.isNotBlank() }
+                val containerExtension = item.optString("container_extension").takeIf { it.isNotBlank() }
+                val customSid = item.optString("custom_sid").takeIf { it.isNotBlank() }
+                val sourceMetadata = buildMap<String, String> {
+                    listOf(
+                        "direct_source", "stream_source", "stream_type", "container_extension",
+                        "custom_sid", "epg_channel_id", "tv_archive", "tv_archive_duration",
+                        "category_id", "num", "stream_id"
+                    ).forEach { key ->
+                        if (item.has(key) && !item.isNull(key)) {
+                            val value = item.opt(key)?.toString().orEmpty()
+                            if (value.isNotBlank() && value != "null") put(key, value)
+                        }
+                    }
                 }
 
                 val tsUrl = buildLiveUrl(
@@ -205,7 +222,12 @@ object XtreamRepository {
                     xtreamNum = item.optInt("num", -1).takeIf { it >= 0 },
                     streamId = streamId,
                     categoryId = categoryId.takeIf { it.isNotBlank() },
-                    categoryOrder = categoryOrders[categoryId]
+                    categoryOrder = categoryOrders[categoryId],
+                    directSource = directSource,
+                    xtreamStreamType = xtreamStreamType,
+                    containerExtension = containerExtension,
+                    customSid = customSid,
+                    sourceMetadata = sourceMetadata
                 )
             }
 
@@ -258,7 +280,7 @@ object XtreamRepository {
             readTimeout = 30_000
             instanceFollowRedirects = true
             requestMethod = "GET"
-            setRequestProperty("User-Agent", "ULAK/0.2.9 AndroidTV")
+            setRequestProperty("User-Agent", "ULAK/0.3.0 AndroidTV")
             setRequestProperty("Accept", "application/json, */*")
         }
         return try {

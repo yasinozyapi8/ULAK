@@ -461,7 +461,7 @@ private fun StreamDiagnosticsScreen(
 
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Xtream Yayın Testi", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-        Text("Önce URL yollarını test et. 200/206 bulunan yol için ÇALIŞAN YOLU OYNAT ile gerçek video/ses track testine geç; teknik panelde Video ve Ses satırlarını kontrol et.", color = Muted, fontSize = 12.sp)
+        Text("Xtream'in direct_source / stream_source ipuçlarını ve standart HLS/TS yollarını ayrı ayrı gösterir. 200/206 bulunan kaynağı oynatıp gerçek video + audio track sonucunu kontrol et.", color = Muted, fontSize = 12.sp)
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Column(Modifier.weight(1f).fillMaxHeight().background(Card, RoundedCornerShape(16.dp)).padding(12.dp)) {
                 Text("KANALLAR • ${ordered.size}", color = Gold, fontWeight = FontWeight.Bold, fontSize = 13.sp)
@@ -484,6 +484,17 @@ private fun StreamDiagnosticsScreen(
             Column(Modifier.weight(1f).fillMaxHeight().background(Card, RoundedCornerShape(16.dp)).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("TEST SONUCU", color = Gold, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                 Text(selected?.name ?: "Kanal seçilmedi", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 2)
+                selected?.let { ch ->
+                    Column(Modifier.fillMaxWidth().background(Color(0xFF0E1114), RoundedCornerShape(9.dp)).padding(9.dp), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                        Text("KAYNAK DERİN TANILAMA", color = Gold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        TechnicalLine("direct_source", if (ch.directSource.isNullOrBlank()) "yok" else "var")
+                        TechnicalLine("stream_type", ch.xtreamStreamType ?: "yok")
+                        TechnicalLine("container", ch.containerExtension ?: "yok")
+                        TechnicalLine("custom_sid", ch.customSid ?: "yok")
+                        val extraSource = ch.sourceMetadata["stream_source"]
+                        if (!extraSource.isNullOrBlank()) TechnicalLine("stream_source", "var")
+                    }
+                }
                 Text(message, color = if (results.any { it.ok }) Gold else Color.White, fontSize = 12.sp)
                 if (testing) CircularProgressIndicator(Modifier.size(28.dp), color = Gold)
                 LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
@@ -1016,11 +1027,12 @@ private fun playbackCandidates(channel: Channel): List<String> {
         !(channel.group?.contains("RAW", ignoreCase = true) == true)) return all
     return all.sortedWith(compareBy<String> {
         when {
-            it.contains(".ts", true) && it.contains("/live/", true) -> 0
-            it.contains(".ts", true) -> 1
-            it.contains(".m3u8", true) && it.contains("/live/", true) -> 2
-            it.contains(".m3u8", true) -> 3
-            else -> 4
+            channel.directSource != null && it == channel.directSource -> 0
+            it.contains(".ts", true) && it.contains("/live/", true) -> 1
+            it.contains(".ts", true) -> 2
+            it.contains(".m3u8", true) && it.contains("/live/", true) -> 3
+            it.contains(".m3u8", true) -> 4
+            else -> 5
         }
     })
 }
@@ -1101,7 +1113,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     // generic/empty user agents even when the account itself is valid.
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.2.9")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.0")
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(
                 mapOf(
@@ -1425,7 +1437,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             val media = Media(libVlc, Uri.parse(activeUrl)).apply {
                                 setHWDecoderEnabled(true, false)
                                 addOption(":network-caching=1500")
-                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.2.9")
+                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.0")
                             }
                             vlcPlayer.media = media
                             media.release()

@@ -12,8 +12,8 @@ android {
         applicationId = "com.ulak.tv"
         minSdk = 23
         targetSdk = 36
-        versionCode = 29
-        versionName = "0.2.9"
+        versionCode = 30
+        versionName = "0.3.0"
     }
 
     buildFeatures { compose = true }
