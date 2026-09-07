@@ -170,7 +170,7 @@ object TsPsiAnalyzer {
                 readTimeout = 10_000
                 requestMethod = "GET"
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 11; Android TV) ULAK/0.3.2")
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 11; Android TV) ULAK/0.3.3")
                 setRequestProperty("Accept", "*/*")
                 setRequestProperty("Connection", "keep-alive")
                 setRequestProperty("Range", "bytes=0-${maxBytes - 1}")

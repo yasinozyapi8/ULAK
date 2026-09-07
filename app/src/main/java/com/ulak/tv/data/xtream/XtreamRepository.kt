@@ -21,6 +21,11 @@ object XtreamRepository {
         val note: String
     )
 
+    private data class M3uIndex(
+        val byStreamId: Map<Long, String> = emptyMap(),
+        val byName: Map<String, String> = emptyMap()
+    )
+
     suspend fun probeChannel(channel: Channel): Result<List<StreamProbeResult>> = withContext(Dispatchers.IO) {
         runCatching {
             val urls = (listOf(channel.streamUrl) + channel.alternateStreamUrls).distinct()
@@ -47,7 +52,7 @@ object XtreamRepository {
                 readTimeout = 10_000
                 requestMethod = "GET"
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "ULAK/0.3.2 AndroidTV")
+                setRequestProperty("User-Agent", "ULAK/0.3.3 AndroidTV")
                 setRequestProperty("Accept", "*/*")
                 setRequestProperty("Connection", "keep-alive")
                 setRequestProperty("Range", "bytes=0-2047")
@@ -114,6 +119,14 @@ object XtreamRepository {
                 ?.toStringList().orEmpty()
             val extension = if (allowedFormats.any { it.equals("m3u8", true) }) "m3u8" else "ts"
 
+            // PC uygulamasının kullandığı yolu da birebir deniyoruz: get.php + output=ts.
+            // Tarayıcı HTTP cleartext yüzünden engellense bile Android uygulaması manifestte
+            // cleartext'e izin verdiği için bu çağrıyı kendi içinden yapabilir. M3U çağrısı
+            // başarısız olursa Xtream API akışı bozulmaz; yalnızca PC-VLC uyumluluk yolu olmaz.
+            val pcM3uIndex = runCatching {
+                loadPcCompatibleM3uIndex(server, username, password)
+            }.getOrDefault(M3uIndex())
+
             val categories = getJsonArray(
                 apiUrl(server, username, password, "get_live_categories")
             )
@@ -143,6 +156,9 @@ object XtreamRepository {
                 if (streamId <= 0) continue
 
                 val categoryId = item.optString("category_id")
+                val channelName = item.optString("name", "İsimsiz Kanal")
+                val pcM3uStreamUrl = pcM3uIndex.byStreamId[streamId]
+                    ?: pcM3uIndex.byName[normalizeChannelName(channelName)]
                 val directSourceRaw = item.optString("direct_source")
                 val directSource = directSourceRaw.takeIf {
                     it.startsWith("http://") || it.startsWith("https://")
@@ -151,6 +167,10 @@ object XtreamRepository {
                 val containerExtension = item.optString("container_extension").takeIf { it.isNotBlank() }
                 val customSid = item.optString("custom_sid").takeIf { it.isNotBlank() }
                 val sourceMetadata = buildMap<String, String> {
+                    if (!pcM3uStreamUrl.isNullOrBlank()) {
+                        put("pc_m3u_stream_url", pcM3uStreamUrl)
+                        put("pc_m3u_source", "get.php?type=m3u_plus&output=ts")
+                    }
                     listOf(
                         "direct_source", "stream_source", "stream_type", "container_extension",
                         "custom_sid", "epg_channel_id", "tv_archive", "tv_archive_duration",
@@ -212,7 +232,7 @@ object XtreamRepository {
                 }.distinct()
 
                 channels += Channel(
-                    name = item.optString("name", "İsimsiz Kanal"),
+                    name = channelName,
                     streamUrl = candidates.first(),
                     alternateStreamUrls = candidates.drop(1),
                     logoUrl = item.optString("stream_icon").takeIf { it.isNotBlank() },
@@ -259,6 +279,75 @@ object XtreamRepository {
         return "$server/player_api.php?$query"
     }
 
+    private fun loadPcCompatibleM3uIndex(
+        server: String,
+        username: String,
+        password: String
+    ): M3uIndex {
+        val url = "$server/get.php?username=${enc(username)}&password=${enc(password)}&type=m3u_plus&output=ts"
+        val text = getTextWithUserAgent(
+            url = url,
+            userAgent = "VLC/3.0.18",
+            accept = "audio/x-mpegurl, application/x-mpegURL, application/vnd.apple.mpegurl, */*"
+        )
+
+        val byId = linkedMapOf<Long, String>()
+        val byName = linkedMapOf<String, String>()
+        var pendingName: String? = null
+
+        text.lineSequence().forEach { raw ->
+            val line = raw.trim()
+            when {
+                line.startsWith("#EXTINF", ignoreCase = true) -> {
+                    pendingName = line.substringAfterLast(',', "").trim().takeIf { it.isNotBlank() }
+                }
+                line.startsWith("http://", ignoreCase = true) || line.startsWith("https://", ignoreCase = true) -> {
+                    extractStreamId(line)?.let { byId.putIfAbsent(it, line) }
+                    pendingName?.let { name ->
+                        val key = normalizeChannelName(name)
+                        if (key.isNotBlank()) byName.putIfAbsent(key, line)
+                    }
+                    pendingName = null
+                }
+            }
+        }
+        return M3uIndex(byId, byName)
+    }
+
+    private fun extractStreamId(url: String): Long? {
+        val clean = url.substringBefore('|')
+        val match = Regex("/(\\d+)\\.(?:ts|m3u8)(?:[?&#]|$)", RegexOption.IGNORE_CASE)
+            .find(clean)
+        return match?.groupValues?.getOrNull(1)?.toLongOrNull()
+    }
+
+    private fun normalizeChannelName(value: String): String = value
+        .trim()
+        .lowercase()
+        .replace(Regex("\\s+"), " ")
+
+    private fun getTextWithUserAgent(url: String, userAgent: String, accept: String): String {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 15_000
+            readTimeout = 45_000
+            instanceFollowRedirects = true
+            requestMethod = "GET"
+            setRequestProperty("User-Agent", userAgent)
+            setRequestProperty("Accept", accept)
+            setRequestProperty("Connection", "keep-alive")
+        }
+        return try {
+            val code = connection.responseCode
+            val stream = if (code in 200..299) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (code !in 200..299) error("M3U sunucu HTTP $code yanıtı verdi.")
+            if (text.isBlank()) error("M3U sunucusu boş yanıt verdi.")
+            text
+        } finally {
+            connection.disconnect()
+        }
+    }
+
     private fun buildLiveUrl(
         server: String,
         username: String,
@@ -280,7 +369,7 @@ object XtreamRepository {
             readTimeout = 30_000
             instanceFollowRedirects = true
             requestMethod = "GET"
-            setRequestProperty("User-Agent", "ULAK/0.3.2 AndroidTV")
+            setRequestProperty("User-Agent", "ULAK/0.3.3 AndroidTV")
             setRequestProperty("Accept", "application/json, */*")
         }
         return try {

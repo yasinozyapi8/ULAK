@@ -299,7 +299,7 @@ private fun Header(profileName: String?) {
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(profileName ?: "Profil yok", color = if (profileName != null) Color.White else Muted, fontSize = 13.sp)
-            Text("v0.3.2", color = Muted, fontSize = 12.sp)
+            Text("v0.3.3", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -1024,21 +1024,30 @@ private fun streamType(url: String): String = when {
     else -> "AUTO"
 }
 
+private fun isRawChannel(channel: Channel): Boolean =
+    channel.name.contains("RAW", ignoreCase = true) ||
+        (channel.group?.contains("RAW", ignoreCase = true) == true)
+
 private fun playbackCandidates(channel: Channel): List<String> {
-    val all = (listOf(channel.streamUrl) + channel.alternateStreamUrls).distinct()
-    // RAW gruplarında HLS görüntü verip audio track taşımayabiliyor. Sunucudaki
-    // testlerde /live/*.ts yolu 200 + video/mp2t verdiği için RAW kanallarda
-    // gerçek MPEG-TS /live yolunu önce dene; diğer kanallarda sağlayıcı sırasını koru.
-    if (!channel.name.contains("RAW", ignoreCase = true) &&
-        !(channel.group?.contains("RAW", ignoreCase = true) == true)) return all
+    val pcM3uUrl = channel.sourceMetadata["pc_m3u_stream_url"]
+    val all = buildList {
+        // v0.3.3: PC programının get.php M3U içinde verdiği URL'yi, özellikle RAW
+        // kanallarda ilk aday yap. URL'yi değiştirmeden LibVLC'ye vereceğiz.
+        if (isRawChannel(channel) && !pcM3uUrl.isNullOrBlank()) add(pcM3uUrl)
+        add(channel.streamUrl)
+        addAll(channel.alternateStreamUrls)
+    }.distinct()
+
+    if (!isRawChannel(channel)) return all
     return all.sortedWith(compareBy<String> {
         when {
-            channel.directSource != null && it == channel.directSource -> 0
-            it.contains(".ts", true) && it.contains("/live/", true) -> 1
-            it.contains(".ts", true) -> 2
-            it.contains(".m3u8", true) && it.contains("/live/", true) -> 3
-            it.contains(".m3u8", true) -> 4
-            else -> 5
+            !pcM3uUrl.isNullOrBlank() && it == pcM3uUrl -> 0
+            channel.directSource != null && it == channel.directSource -> 1
+            it.contains(".ts", true) && it.contains("/live/", true) -> 2
+            it.contains(".ts", true) -> 3
+            it.contains(".m3u8", true) && it.contains("/live/", true) -> 4
+            it.contains(".m3u8", true) -> 5
+            else -> 6
         }
     })
 }
@@ -1121,7 +1130,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     // generic/empty user agents even when the account itself is valid.
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.2")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.3")
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(
                 mapOf(
@@ -1144,7 +1153,10 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     val libVlc = remember {
         LibVLC(
             context.applicationContext,
-            arrayListOf("--network-caching=1500", "--clock-jitter=0", "--clock-synchro=0")
+            arrayListOf(
+                "--network-caching=1000",
+                "--user-agent=VLC/3.0.18 LibVLC/3.0.18"
+            )
         )
     }
     val vlcPlayer = remember { VlcMediaPlayer(libVlc) }
@@ -1224,21 +1236,42 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
             runCatching { vlcPlayer.stop() }
             runCatching { vlcPlayer.detachViews() }
         }
-        useVlc = false
-        vlcStatus = "VLC bekliyor"
+
+        val selectedChannel = channels[currentIndex]
+        val pcM3uUrl = selectedChannel.sourceMetadata["pc_m3u_stream_url"]
+        val pcVlcCompatibility = isRawChannel(selectedChannel) &&
+            !pcM3uUrl.isNullOrBlank() && url == pcM3uUrl
+
         detectedVideoCodec = "BEKLENİYOR"
-        smartDecision = "ExoPlayer ile analiz ediliyor"
         firstFrameRendered = false
-        vlcTriedForCandidate = false
         psiAnalysis = null
         psiStatus = "Bekleniyor"
         activeUrl = url
         playbackError = null
-        status = "Yayın hazırlanıyor…"
         audioInfo = "Ses: bekleniyor"
         videoInfo = "Video: bekleniyor"
         player.stop()
         player.clearMediaItems()
+
+        if (pcVlcCompatibility) {
+            // PC'deki çalışan uygulamanın davranışını taklit et: get.php M3U'dan
+            // gelen URL'yi hiç yeniden yazmadan doğrudan LibVLC'ye ver.
+            useVlc = true
+            vlcTriedForCandidate = true
+            vlcStatus = "PC VLC uyumluluk modu başlatılıyor…"
+            smartDecision = "PC VLC modu • M3U kaynak URL"
+            status = "Yayın hazırlanıyor • PC VLC"
+            videoInfo = "Video: VLC ile hazırlanıyor"
+            attemptLog = attemptLog + "PC VLC: M3U içindeki gerçek URL kullanılıyor"
+            showOverlay()
+            return
+        }
+
+        useVlc = false
+        vlcStatus = "VLC bekliyor"
+        smartDecision = "ExoPlayer ile analiz ediliyor"
+        vlcTriedForCandidate = false
+        status = "Yayın hazırlanıyor…"
         // Let Media3 sniff the actual stream/container. Some Xtream panels
         // return HLS/TS content through URLs whose extension does not describe
         // the response reliably.
@@ -1455,12 +1488,14 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                                     VlcMediaPlayer.Event.Playing -> {
                                         vlcStatus = "VLC oynatıyor"
                                         status = "Canlı yayın • VLC"
-                                        smartDecision = "LibVLC • uyumluluk motoru aktif"
+                                        smartDecision = if (activeUrl == channels[currentIndex].sourceMetadata["pc_m3u_stream_url"])
+                                            "PC VLC modu • M3U URL oynatılıyor" else "LibVLC • uyumluluk motoru aktif"
                                         videoInfo = "Video: VLC yazılım/uyumluluk motoru"
                                     }
                                     VlcMediaPlayer.Event.Vout -> {
                                         vlcStatus = "VLC video çıkışı aktif"
-                                        smartDecision = "LibVLC • video çıkışı aktif"
+                                        smartDecision = if (activeUrl == channels[currentIndex].sourceMetadata["pc_m3u_stream_url"])
+                                            "PC VLC modu • video çıkışı aktif" else "LibVLC • video çıkışı aktif"
                                         videoInfo = "Video: VLC çıkışı aktif"
                                     }
                                     VlcMediaPlayer.Event.EncounteredError -> {
@@ -1478,8 +1513,8 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             }
                             val media = Media(libVlc, Uri.parse(activeUrl)).apply {
                                 setHWDecoderEnabled(true, false)
-                                addOption(":network-caching=1500")
-                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.2")
+                                addOption(":network-caching=1000")
+                                addOption(":http-user-agent=VLC/3.0.18 LibVLC/3.0.18")
                             }
                             vlcPlayer.media = media
                             media.release()
@@ -1610,6 +1645,11 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             TechnicalLine("TS kaynak", psi.sourceKind)
                         }
                         TechnicalLine("Yayın", streamType(activeUrl))
+                        TechnicalLine(
+                            "PC M3U",
+                            if (channel.sourceMetadata["pc_m3u_stream_url"].isNullOrBlank()) "bulunamadı"
+                            else if (activeUrl == channel.sourceMetadata["pc_m3u_stream_url"]) "aktif" else "hazır"
+                        )
                         TechnicalLine("Motor", if (useVlc) "LibVLC" else "Media3 / ExoPlayer")
                         TechnicalLine("Akıllı seçim", smartDecision)
                         TechnicalLine("Durum", status)
