@@ -39,6 +39,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.datasource.HttpDataSource
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -299,7 +300,7 @@ private fun Header(profileName: String?) {
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(profileName ?: "Profil yok", color = if (profileName != null) Color.White else Muted, fontSize = 13.sp)
-            Text("v0.3.3.1", color = Muted, fontSize = 12.sp)
+            Text("v0.3.4", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -1025,11 +1026,7 @@ private fun streamType(url: String): String = when {
 }
 
 private fun playbackCandidates(channel: Channel): List<String> {
-    // v0.3.3.1: PC uygulamasındaki get.php M3U'dan gelen gerçek URL varsa
-    // Media3 ile ilk aday olarak dene. LibVLC'yi zorlamıyoruz; eski TV'lerde native crash
-    // gözlendiği için bu sürüm güvenli geri dönüş + gerçek M3U URL testi yapıyor.
-    val pcM3uUrl = channel.sourceMetadata["pc_m3u_stream_url"]
-    val all = (listOfNotNull(pcM3uUrl, channel.streamUrl) + channel.alternateStreamUrls).distinct()
+    val all = (listOf(channel.streamUrl) + channel.alternateStreamUrls).distinct()
     // RAW gruplarında HLS görüntü verip audio track taşımayabiliyor. Sunucudaki
     // testlerde /live/*.ts yolu 200 + video/mp2t verdiği için RAW kanallarda
     // gerçek MPEG-TS /live yolunu önce dene; diğer kanallarda sağlayıcı sırasını koru.
@@ -1098,6 +1095,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
 
     var currentIndex by remember(channels, initialIndex) { mutableIntStateOf(initialIndex.coerceIn(channels.indices)) }
     val channel = channels[currentIndex]
+    val isRawChannel = channel.name.contains("RAW", ignoreCase = true) || (channel.group?.contains("RAW", ignoreCase = true) == true)
     var candidates by remember { mutableStateOf(playbackCandidates(channel)) }
     var candidateIndex by remember { mutableIntStateOf(0) }
     var activeUrl by remember { mutableStateOf(candidates.first()) }
@@ -1125,7 +1123,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     // generic/empty user agents even when the account itself is valid.
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.3.1")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.4")
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(
                 mapOf(
@@ -1138,7 +1136,17 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         // previously rendered video correctly.
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpFactory)
-        ExoPlayer.Builder(context)
+
+        // v0.3.4: RAW kanallarda PMT içinde MPEG-1/2 Audio PID bulunduğu halde
+        // Android TV'nin platform decoder'ı audio/mpeg-L2 formatını her cihazda
+        // desteklemek zorunda değil. FFmpeg audio renderer'ını platform decoder'ından
+        // önce tercih ediyoruz. Normal H.264/H.265 video yine Media3/MediaCodec ile
+        // donanım hızlandırmalı kalır; sadece gerekli ses codec'i FFmpeg'e düşer.
+        val renderersFactory = DefaultRenderersFactory(context)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER)
+            .setEnableDecoderFallback(true)
+
+        ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .build()
     }
@@ -1231,7 +1239,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         useVlc = false
         vlcStatus = "VLC bekliyor"
         detectedVideoCodec = "BEKLENİYOR"
-        smartDecision = "ExoPlayer ile analiz ediliyor"
+        smartDecision = "Media3 + FFmpeg ses çözümleme hazırlanıyor"
         firstFrameRendered = false
         vlcTriedForCandidate = false
         psiAnalysis = null
@@ -1372,15 +1380,30 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             // keep the video alive and report the stream as silent instead of
                             // tearing down the working decoder.
                             val reason = "Görüntü var fakat 4.5 sn içinde ses akışı algılanmadı"
-                            val moved = tryNextCandidate("$reason • alternatif yayın aranıyor")
-                            if (!moved) {
-                                status = "Canlı yayın • ses akışı yok"
-                                smartDecision = "Video korunuyor • ses akışı bulunamadı"
-                                audioInfo = "Ses: yayın akışı yok / algılanmadı"
+                            if (isRawChannel) {
+                                // v0.3.4: RAW kanalda görüntü zaten çalışıyorsa ikinci bir HTTP
+                                // bağlantısı açıp PAT/PMT analizi yapma ve aynı kanal için diğer
+                                // Xtream URL'lerine sıçrama. Bazı IPTV sunucuları ikinci eşzamanlı
+                                // bağlantıyı görünce ilk canlı bağlantıyı kapatıyor. Önceki teşhiste
+                                // PMT içinde MPEG-1 Audio PID bulunduğu doğrulandı; bu aşamada çalışan
+                                // videoyu korumak daha güvenli.
+                                status = "Canlı yayın • FFmpeg ses kontrolü"
+                                smartDecision = "RAW video korunuyor • FFmpeg ses renderer aktif"
+                                audioInfo = "Ses: Media3 track oluşturamadı"
                                 playbackError = null
-                                attemptLog = attemptLog + "${streamType(urlAtReady)}: $reason • VLC güvenlik nedeniyle denenmedi"
-                                analyzePsi(urlAtReady, generationAtReady)
+                                psiStatus = "Otomatik PSI kapalı • yayın korunuyor"
+                                attemptLog = attemptLog + "${streamType(urlAtReady)}: $reason • RAW yayında bağlantı korunuyor"
                                 showOverlay()
+                            } else {
+                                val moved = tryNextCandidate("$reason • alternatif yayın aranıyor")
+                                if (!moved) {
+                                    status = "Canlı yayın • ses akışı yok"
+                                    smartDecision = "Video korunuyor • ses akışı bulunamadı"
+                                    audioInfo = "Ses: yayın akışı yok / algılanmadı"
+                                    playbackError = null
+                                    attemptLog = attemptLog + "${streamType(urlAtReady)}: $reason • VLC güvenlik nedeniyle denenmedi"
+                                    showOverlay()
+                                }
                             }
                         }
                     }
@@ -1483,7 +1506,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             val media = Media(libVlc, Uri.parse(activeUrl)).apply {
                                 setHWDecoderEnabled(true, false)
                                 addOption(":network-caching=1500")
-                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.3.1")
+                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.4")
                             }
                             vlcPlayer.media = media
                             media.release()
@@ -1614,7 +1637,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             TechnicalLine("TS kaynak", psi.sourceKind)
                         }
                         TechnicalLine("Yayın", streamType(activeUrl))
-                        TechnicalLine("Motor", if (useVlc) "LibVLC" else "Media3 / ExoPlayer")
+                        TechnicalLine("Motor", if (useVlc) "LibVLC" else "Media3 + FFmpeg Audio")
                         TechnicalLine("Akıllı seçim", smartDecision)
                         TechnicalLine("Durum", status)
                         TechnicalLine("Yol", "${candidateIndex + 1}/${candidates.size}")

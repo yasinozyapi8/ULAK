@@ -13,7 +13,7 @@ android {
         minSdk = 23
         targetSdk = 36
         versionCode = 35
-        versionName = "0.3.3.1"
+        versionName = "0.3.4"
     }
 
     buildFeatures { compose = true }
@@ -34,9 +34,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("androidx.tv:tv-material:1.0.0")
     implementation("io.coil-kt:coil-compose:2.7.0")
-    implementation("androidx.media3:media3-exoplayer:1.11.0")
-    implementation("androidx.media3:media3-exoplayer-hls:1.11.0")
-    implementation("androidx.media3:media3-ui:1.11.0")
+    implementation("androidx.media3:media3-exoplayer:1.9.0")
+    implementation("androidx.media3:media3-exoplayer-hls:1.9.0")
+    implementation("androidx.media3:media3-ui:1.9.0")
+    implementation("org.jellyfin.media3:media3-ffmpeg-decoder:1.9.0+1")
     implementation("org.videolan.android:libvlc-all:3.7.5")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
