@@ -11,6 +11,76 @@ import java.net.URLEncoder
 
 object XtreamRepository {
 
+    data class StreamProbeResult(
+        val label: String,
+        val url: String,
+        val code: Int?,
+        val contentType: String?,
+        val finalUrl: String?,
+        val ok: Boolean,
+        val note: String
+    )
+
+    suspend fun probeChannel(channel: Channel): Result<List<StreamProbeResult>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val urls = (listOf(channel.streamUrl) + channel.alternateStreamUrls).distinct()
+            urls.mapIndexed { index, url ->
+                val label = when {
+                    url.contains(".m3u8", true) && url.contains("/live/") -> "HLS /live"
+                    url.contains(".m3u8", true) -> "HLS rewrite"
+                    url.contains(".ts", true) && url.contains("/live/") -> "TS /live"
+                    url.contains(".ts", true) -> "TS rewrite"
+                    index == 0 -> "direct_source"
+                    else -> "Kaynak ${index + 1}"
+                }
+                probeUrl(label, url)
+            }
+        }
+    }
+
+    private fun probeUrl(label: String, url: String): StreamProbeResult {
+        var connection: HttpURLConnection? = null
+        return try {
+            connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 10_000
+                readTimeout = 10_000
+                requestMethod = "GET"
+                instanceFollowRedirects = true
+                setRequestProperty("User-Agent", "ULAK/0.2.9 AndroidTV")
+                setRequestProperty("Accept", "*/*")
+                setRequestProperty("Connection", "keep-alive")
+                setRequestProperty("Range", "bytes=0-2047")
+            }
+            val code = connection.responseCode
+            val type = connection.contentType
+            val finalUrl = connection.url?.toString()
+            val ok = code in 200..299
+            if (ok) {
+                runCatching {
+                    connection.inputStream.use { input ->
+                        val buffer = ByteArray(512)
+                        input.read(buffer)
+                    }
+                }
+            }
+            StreamProbeResult(
+                label = label, url = url, code = code, contentType = type, finalUrl = finalUrl, ok = ok,
+                note = when (code) {
+                    200, 206 -> "Sunucu yayını kabul ediyor"
+                    401 -> "Yetkilendirme reddedildi"
+                    403 -> "Sunucu erişimi reddetti"
+                    404 -> "Yayın adresi bulunamadı"
+                    in 500..599 -> "Sunucu geçici hata verdi"
+                    else -> "HTTP $code"
+                }
+            )
+        } catch (t: Throwable) {
+            StreamProbeResult(label, url, null, null, null, false, t.message ?: t.javaClass.simpleName)
+        } finally {
+            connection?.disconnect()
+        }
+    }
+
     suspend fun loginAndLoadLive(
         serverUrl: String,
         username: String,
@@ -51,6 +121,13 @@ object XtreamRepository {
                     val item = categories.optJSONObject(i) ?: continue
                     val id = item.optString("category_id")
                     if (id.isNotBlank()) put(id, item.optString("category_name", "Diğer"))
+                }
+            }
+            val categoryOrders = buildMap<String, Int> {
+                for (i in 0 until categories.length()) {
+                    val item = categories.optJSONObject(i) ?: continue
+                    val id = item.optString("category_id")
+                    if (id.isNotBlank()) put(id, i + 1)
                 }
             }
 
@@ -123,7 +200,12 @@ object XtreamRepository {
                     alternateStreamUrls = candidates.drop(1),
                     logoUrl = item.optString("stream_icon").takeIf { it.isNotBlank() },
                     group = categoryNames[categoryId] ?: "Diğer",
-                    tvgId = item.optString("epg_channel_id").takeIf { it.isNotBlank() }
+                    tvgId = item.optString("epg_channel_id").takeIf { it.isNotBlank() },
+                    serverOrder = i + 1,
+                    xtreamNum = item.optInt("num", -1).takeIf { it >= 0 },
+                    streamId = streamId,
+                    categoryId = categoryId.takeIf { it.isNotBlank() },
+                    categoryOrder = categoryOrders[categoryId]
                 )
             }
 
@@ -176,7 +258,7 @@ object XtreamRepository {
             readTimeout = 30_000
             instanceFollowRedirects = true
             requestMethod = "GET"
-            setRequestProperty("User-Agent", "ULAK/0.2.1 AndroidTV")
+            setRequestProperty("User-Agent", "ULAK/0.2.9 AndroidTV")
             setRequestProperty("Accept", "application/json, */*")
         }
         return try {

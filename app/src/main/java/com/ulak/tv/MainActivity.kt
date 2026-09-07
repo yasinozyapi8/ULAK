@@ -13,9 +13,12 @@ import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -44,6 +47,8 @@ import androidx.tv.material3.Button
 import androidx.tv.material3.MaterialTheme
 import coil.compose.AsyncImage
 import com.ulak.tv.data.m3u.M3uRepository
+import com.ulak.tv.data.FavoritesStore
+import com.ulak.tv.data.favoriteKey
 import com.ulak.tv.data.model.Channel
 import com.ulak.tv.data.xtream.XtreamProfileStore
 import com.ulak.tv.data.xtream.XtreamRepository
@@ -67,8 +72,12 @@ private sealed interface Screen {
     data object M3uLogin : Screen
     data object XtreamLogin : Screen
     data object Channels : Screen
+    data object Favorites : Screen
+    data object ChannelOrderDiagnostics : Screen
+    data object StreamDiagnostics : Screen
     data object Update : Screen
     data class Player(val index: Int) : Screen
+    data class ProbePlayer(val channel: Channel) : Screen
 }
 
 class MainActivity : ComponentActivity() {
@@ -82,12 +91,17 @@ class MainActivity : ComponentActivity() {
 fun UlakApp() {
     val context = LocalContext.current
     val profileStore = remember { XtreamProfileStore(context.applicationContext) }
+    val favoritesStore = remember { FavoritesStore(context.applicationContext) }
     var savedProfile by remember { mutableStateOf(profileStore.load()) }
     var screen: Screen by remember { mutableStateOf(Screen.Home) }
     var channelBackScreen: Screen by remember { mutableStateOf(Screen.Home) }
+    var playerBackScreen: Screen by remember { mutableStateOf(Screen.Channels) }
     var channels by remember { mutableStateOf(emptyList<Channel>()) }
     var homeLoading by remember { mutableStateOf(false) }
     var homeError by remember { mutableStateOf<String?>(null) }
+    var browserSelectedGroup by remember { mutableStateOf("Tümü") }
+    var browserSelectedUrl by remember { mutableStateOf<String?>(null) }
+    var favoriteIds by remember { mutableStateOf(favoritesStore.ids()) }
     val scope = rememberCoroutineScope()
 
     fun connectSavedProfile() {
@@ -107,7 +121,12 @@ fun UlakApp() {
     }
 
     if (screen is Screen.Player) {
-        PlayerScreen(channels = channels, initialIndex = (screen as Screen.Player).index, onBack = { screen = Screen.Channels })
+        PlayerScreen(channels = channels, initialIndex = (screen as Screen.Player).index, onBack = { screen = playerBackScreen })
+        return
+    }
+    if (screen is Screen.ProbePlayer) {
+        val probe = (screen as Screen.ProbePlayer).channel
+        PlayerScreen(channels = listOf(probe), initialIndex = 0, onBack = { screen = Screen.StreamDiagnostics })
         return
     }
 
@@ -129,7 +148,58 @@ fun UlakApp() {
                     error = homeError,
                     onLiveTv = { if (savedProfile != null) connectSavedProfile() else screen = Screen.AddProfile },
                     onAddProfile = { screen = Screen.AddProfile },
+                    onFavorites = {
+                        if (savedProfile == null) {
+                            screen = Screen.AddProfile
+                        } else if (channels.isNotEmpty()) {
+                            screen = Screen.Favorites
+                        } else {
+                            homeLoading = true
+                            homeError = null
+                            scope.launch {
+                                XtreamRepository.loginAndLoadLive(savedProfile!!.server, savedProfile!!.username, savedProfile!!.password)
+                                    .onSuccess { loaded -> channels = loaded; favoritesStore.removeMissing(loaded); favoriteIds = favoritesStore.ids(); screen = Screen.Favorites }
+                                    .onFailure { homeError = it.message ?: "Favoriler için kanallar alınamadı." }
+                                homeLoading = false
+                            }
+                        }
+                    },
                     onCheckUpdate = { screen = Screen.Update },
+                    onStreamDiagnostics = {
+                        if (savedProfile == null) {
+                            screen = Screen.AddProfile
+                        } else if (channels.isNotEmpty()) {
+                            screen = Screen.StreamDiagnostics
+                        } else {
+                            homeLoading = true
+                            homeError = null
+                            scope.launch {
+                                XtreamRepository.loginAndLoadLive(savedProfile!!.server, savedProfile!!.username, savedProfile!!.password)
+                                    .onSuccess { loaded -> channels = loaded; screen = Screen.StreamDiagnostics }
+                                    .onFailure { homeError = it.message ?: "Yayın testi için kanallar alınamadı." }
+                                homeLoading = false
+                            }
+                        }
+                    },
+                    onChannelOrderDiagnostics = {
+                        if (savedProfile == null) {
+                            screen = Screen.AddProfile
+                        } else if (channels.isNotEmpty()) {
+                            screen = Screen.ChannelOrderDiagnostics
+                        } else {
+                            homeLoading = true
+                            homeError = null
+                            scope.launch {
+                                XtreamRepository.loginAndLoadLive(savedProfile!!.server, savedProfile!!.username, savedProfile!!.password)
+                                    .onSuccess { loaded ->
+                                        channels = loaded
+                                        screen = Screen.ChannelOrderDiagnostics
+                                    }
+                                    .onFailure { homeError = it.message ?: "Kanal sırası alınamadı." }
+                                homeLoading = false
+                            }
+                        }
+                    },
                     onDeleteProfile = {
                         profileStore.clear()
                         savedProfile = null
@@ -169,15 +239,46 @@ fun UlakApp() {
                     onBack = { screen = Screen.AddProfile }
                 )
                 Screen.Update -> UpdateScreen(onBack = { screen = Screen.Home })
+                Screen.ChannelOrderDiagnostics -> ChannelOrderDiagnosticsScreen(
+                    channels = channels,
+                    onBack = { screen = Screen.Home }
+                )
+                Screen.StreamDiagnostics -> StreamDiagnosticsScreen(
+                    channels = channels,
+                    onPlayTest = { channel, url -> screen = Screen.ProbePlayer(channel.copy(streamUrl = url, alternateStreamUrls = emptyList())) },
+                    onBack = { screen = Screen.Home }
+                )
+                Screen.Favorites -> ChannelBrowserScreen(
+                    channels = channels.filter { it.favoriteKey() in favoriteIds },
+                    initialGroup = "Favoriler",
+                    initialSelectedUrl = browserSelectedUrl,
+                    titleOverride = "Favoriler",
+                    favoriteIds = favoriteIds,
+                    onToggleFavorite = { channel -> favoritesStore.toggle(channel); favoriteIds = favoritesStore.ids() },
+                    onSelectionChanged = { _, channel -> browserSelectedUrl = channel?.streamUrl },
+                    onPlay = { channel -> browserSelectedUrl = channel.streamUrl; val index = channels.indexOfFirst { it.streamUrl == channel.streamUrl }; playerBackScreen = Screen.Favorites; screen = Screen.Player(index.coerceAtLeast(0)) },
+                    onBack = { screen = Screen.Home }
+                )
                 Screen.Channels -> ChannelBrowserScreen(
                     channels = channels,
+                    initialGroup = browserSelectedGroup,
+                    initialSelectedUrl = browserSelectedUrl,
+                    favoriteIds = favoriteIds,
+                    onToggleFavorite = { channel -> favoritesStore.toggle(channel); favoriteIds = favoritesStore.ids() },
+                    onSelectionChanged = { group, channel ->
+                        browserSelectedGroup = group
+                        browserSelectedUrl = channel?.streamUrl
+                    },
                     onPlay = { channel ->
+                        browserSelectedUrl = channel.streamUrl
                         val index = channels.indexOfFirst { it.streamUrl == channel.streamUrl }
+                        playerBackScreen = Screen.Channels
                         screen = Screen.Player(index.coerceAtLeast(0))
                     },
                     onBack = { screen = channelBackScreen }
                 )
                 is Screen.Player -> Unit
+                is Screen.ProbePlayer -> Unit
             }
         }
     }
@@ -197,7 +298,7 @@ private fun Header(profileName: String?) {
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(profileName ?: "Profil yok", color = if (profileName != null) Color.White else Muted, fontSize = 13.sp)
-            Text("v0.2.1", color = Muted, fontSize = 12.sp)
+            Text("v0.2.8", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -209,7 +310,10 @@ private fun HomeScreen(
     error: String?,
     onLiveTv: () -> Unit,
     onAddProfile: () -> Unit,
+    onFavorites: () -> Unit,
     onCheckUpdate: () -> Unit,
+    onStreamDiagnostics: () -> Unit,
+    onChannelOrderDiagnostics: () -> Unit,
     onDeleteProfile: () -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
@@ -230,7 +334,7 @@ private fun HomeScreen(
             PremiumMenuCard("▶", "CANLI TV", if (profile != null) "Kanalları aç" else "Profil gerekli", true, onLiveTv)
             PremiumMenuCard("▣", "FİLMLER", "Yakında", false) {}
             PremiumMenuCard("▤", "DİZİLER", "Yakında", false) {}
-            PremiumMenuCard("★", "FAVORİLER", "Yakında", false) {}
+            PremiumMenuCard("★", "FAVORİLER", "Kaydettiklerin", profile != null, onFavorites)
             PremiumMenuCard("↺", "SON İZLENENLER", "Yakında", false) {}
         }
 
@@ -241,14 +345,187 @@ private fun HomeScreen(
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(onClick = onAddProfile) { Text(if (profile == null) "+ PROFİL EKLE" else "PROFİLİ DÜZENLE") }
-            if (profile != null) Button(onClick = onDeleteProfile) { Text("PROFİLİ SİL") }
-            Button(onClick = onCheckUpdate) { Text("GÜNCELLEME") }
+            UlakActionButton(if (profile == null) "+ PROFİL EKLE" else "PROFİLİ DÜZENLE", onClick = onAddProfile)
+            if (profile != null) UlakActionButton("PROFİLİ SİL", onClick = onDeleteProfile)
+            UlakActionButton("GÜNCELLEME", onClick = onCheckUpdate)
+            if (profile != null) UlakActionButton("SIRA TESTİ", onClick = onChannelOrderDiagnostics)
+            if (profile != null) UlakActionButton("YAYIN TESTİ", onClick = onStreamDiagnostics)
         }
     }
 }
 
 
+
+@Composable
+private fun ChannelOrderDiagnosticsScreen(
+    channels: List<Channel>,
+    onBack: () -> Unit
+) {
+    BackHandler(onBack = onBack)
+    val beinChannels = remember(channels) {
+        channels.filter {
+            it.name.lowercase()
+                .replace("ı", "i")
+                .contains("bein")
+        }
+    }
+    val firstChannels = remember(channels) { channels.take(30) }
+
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        Text("Xtream Kanal Sırası Tanılama", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text(
+            "Sunucunun get_live_streams yanıtındaki gerçek sıra ile Xtream num alanını ayrı ayrı gösterir. Bu ekran sıralama yapmaz; ham veriyi gösterir.",
+            color = Muted,
+            fontSize = 13.sp
+        )
+        Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            DiagnosticListCard(
+                title = "SUNUCUDAN GELEN İLK 30",
+                channels = firstChannels,
+                modifier = Modifier.weight(1f).fillMaxHeight()
+            )
+            DiagnosticListCard(
+                title = "BEIN EŞLEŞMELERİ • ${beinChannels.size}",
+                channels = beinChannels.take(40),
+                modifier = Modifier.weight(1f).fillMaxHeight(),
+                emptyMessage = "Adında beIN geçen kanal bulunamadı."
+            )
+        }
+        Text(
+            "Sıra = JSON içindeki geliş pozisyonu • num = sağlayıcının Xtream num değeri • kat = kategori sırası • id = stream_id",
+            color = Color.White,
+            fontSize = 12.sp
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            UlakActionButton("GERİ", onClick = onBack)
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticListCard(
+    title: String,
+    channels: List<Channel>,
+    modifier: Modifier = Modifier,
+    emptyMessage: String = "Kanal yok."
+) {
+    Column(
+        modifier.background(Card, RoundedCornerShape(16.dp))
+            .border(1.dp, Color(0xFF343A40), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(title, color = Gold, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+        if (channels.isEmpty()) {
+            Text(emptyMessage, color = Color.White, fontSize = 13.sp)
+        } else {
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                items(channels, key = { "${it.streamId}-${it.streamUrl}" }) { channel ->
+                    Column(
+                        Modifier.fillMaxWidth()
+                            .background(Color(0xFF0E1114), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                    ) {
+                        Text(channel.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "Sıra ${channel.serverOrder ?: "-"}  •  num ${channel.xtreamNum ?: "-"}  •  kat ${channel.categoryOrder ?: "-"}  •  id ${channel.streamId ?: "-"}",
+                            color = Gold,
+                            fontSize = 11.sp,
+                            maxLines = 1
+                        )
+                        Text(channel.group ?: "Diğer", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StreamDiagnosticsScreen(
+    channels: List<Channel>,
+    onPlayTest: (Channel, String) -> Unit,
+    onBack: () -> Unit
+) {
+    BackHandler(onBack = onBack)
+    val scope = rememberCoroutineScope()
+    val ordered = remember(channels) {
+        channels.sortedWith(compareBy<Channel> { it.categoryOrder ?: Int.MAX_VALUE }.thenBy { it.serverOrder ?: Int.MAX_VALUE })
+    }
+    var selected by remember(ordered) { mutableStateOf(ordered.firstOrNull()) }
+    var testing by remember { mutableStateOf(false) }
+    var results by remember { mutableStateOf<List<XtreamRepository.StreamProbeResult>>(emptyList()) }
+    var message by remember { mutableStateOf("Bir kanal seçip TEST ET'e bas.") }
+    val playableResult = results.firstOrNull { it.ok }
+    val playableTsLive = results.firstOrNull { it.ok && it.label == "TS /live" }
+
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Xtream Yayın Testi", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+        Text("Önce URL yollarını test et. 200/206 bulunan yol için ÇALIŞAN YOLU OYNAT ile gerçek video/ses track testine geç; teknik panelde Video ve Ses satırlarını kontrol et.", color = Muted, fontSize = 12.sp)
+        Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+            Column(Modifier.weight(1f).fillMaxHeight().background(Card, RoundedCornerShape(16.dp)).padding(12.dp)) {
+                Text("KANALLAR • ${ordered.size}", color = Gold, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Spacer(Modifier.height(8.dp))
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    items(ordered, key = { "probe-${it.streamId}-${it.streamUrl}" }) { channel ->
+                        FocusRow(selected?.streamUrl == channel.streamUrl, {
+                            selected = channel
+                            results = emptyList()
+                            message = "${channel.name} seçildi."
+                        }, Modifier.fillMaxWidth()) {
+                            Column {
+                                Text(channel.name, color = Color.White, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${channel.group ?: "Diğer"} • sıra ${channel.serverOrder ?: "-"} • id ${channel.streamId ?: "-"}", color = Muted, fontSize = 10.sp, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+            }
+            Column(Modifier.weight(1f).fillMaxHeight().background(Card, RoundedCornerShape(16.dp)).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("TEST SONUCU", color = Gold, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                Text(selected?.name ?: "Kanal seçilmedi", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold, maxLines = 2)
+                Text(message, color = if (results.any { it.ok }) Gold else Color.White, fontSize = 12.sp)
+                if (testing) CircularProgressIndicator(Modifier.size(28.dp), color = Gold)
+                LazyColumn(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    items(results) { r ->
+                        Column(Modifier.fillMaxWidth().background(Color(0xFF0E1114), RoundedCornerShape(9.dp)).padding(9.dp)) {
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                Text(r.label, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                                Text(if (r.code != null) "HTTP ${r.code}" else "HATA", color = if (r.ok) Gold else Color(0xFFFF8A80), fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                            }
+                            Text(r.contentType ?: "Content-Type yok", color = Muted, fontSize = 10.sp, maxLines = 1)
+                            Text(r.note, color = if (r.ok) Color.White else Color(0xFFFFB4AB), fontSize = 10.sp, maxLines = 2)
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    UlakActionButton(if (testing) "TEST EDİLİYOR…" else "TEST ET", enabled = !testing && selected != null, onClick = {
+                        val channel = selected ?: return@UlakActionButton
+                        testing = true
+                        results = emptyList()
+                        message = "Yayın yolları kontrol ediliyor…"
+                        scope.launch {
+                            XtreamRepository.probeChannel(channel)
+                                .onSuccess { out ->
+                                    results = out
+                                    val working = out.filter { it.ok }
+                                    message = if (working.isNotEmpty()) "${working.size}/${out.size} yol sunucu tarafından kabul edildi." else "Hiçbir yol kabul edilmedi."
+                                }
+                                .onFailure { message = it.message ?: "Test başarısız." }
+                            testing = false
+                        }
+                    })
+                    if (playableTsLive != null && selected != null) {
+                        UlakActionButton("TS /LIVE OYNAT", onClick = { onPlayTest(selected!!, playableTsLive.url) })
+                    } else if (playableResult != null && selected != null) {
+                        UlakActionButton("ÇALIŞAN YOLU OYNAT", onClick = { onPlayTest(selected!!, playableResult.url) })
+                    }
+                    UlakActionButton("GERİ", onClick = onBack)
+                }
+            }
+        }
+    }
+}
 
 @Composable
 private fun UpdateScreen(onBack: () -> Unit) {
@@ -264,106 +541,171 @@ private fun UpdateScreen(onBack: () -> Unit) {
     var progress by remember { mutableStateOf(0) }
     var release by remember { mutableStateOf<GitHubUpdateManager.ReleaseInfo?>(null) }
     var downloadedApk by remember { mutableStateOf<java.io.File?>(null) }
-    var message by remember { mutableStateOf("GitHub Releases üzerinden yeni ULAK sürümlerini kontrol et.") }
+    var message by remember { mutableStateOf("Güncelleme durumu hazırlanıyor…") }
     var error by remember { mutableStateOf<String?>(null) }
+    var checkedOnce by remember { mutableStateOf(false) }
 
     fun check() {
+        if (checking || downloading) return
         checking = true
         error = null
         release = null
         downloadedApk = null
-        message = "GitHub kontrol ediliyor…"
+        message = "Yeni sürüm kontrol ediliyor…"
         scope.launch {
             GitHubUpdateManager.checkLatest(currentVersion)
                 .onSuccess { found ->
                     release = found
                     message = if (found == null) {
-                        "ULAK v$currentVersion güncel."
+                        "ULAK güncel • v$currentVersion"
                     } else {
-                        "Yeni sürüm bulundu: v${found.version}"
+                        "Yeni sürüm hazır • v${found.version}"
                     }
                 }
                 .onFailure {
                     error = it.message ?: "Güncelleme kontrol edilemedi."
-                    message = "Güncelleme kontrolü başarısız."
+                    message = "Güncelleme kontrolü başarısız"
                 }
             checking = false
+            checkedOnce = true
         }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!checkedOnce) check()
     }
 
     BackHandler(enabled = !downloading, onBack = onBack)
 
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
         Text("ULAK Güncelleme", color = Color.White, fontSize = 30.sp, fontWeight = FontWeight.Bold)
-        Text("Yüklü sürüm: v$currentVersion", color = Gold, fontSize = 15.sp)
+        Text("Yüklü sürüm  •  v$currentVersion", color = Gold, fontSize = 15.sp, fontWeight = FontWeight.Bold)
 
         Column(
             Modifier.fillMaxWidth(0.72f)
                 .background(Card, RoundedCornerShape(18.dp))
                 .border(1.dp, Color(0xFF30343A), RoundedCornerShape(18.dp))
                 .padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+            verticalArrangement = Arrangement.spacedBy(11.dp)
         ) {
-            Text(message, color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            release?.let { r ->
-                Text(r.title, color = Gold, fontSize = 14.sp)
-                if (r.notes.isNotBlank()) {
-                    Text(r.notes.take(600), color = Muted, fontSize = 13.sp, maxLines = 8, overflow = TextOverflow.Ellipsis)
+            val stateColor = when {
+                error != null -> Color(0xFFFF8A80)
+                downloading -> Gold
+                release != null -> Gold
+                checkedOnce && !checking -> Color(0xFF81C784)
+                else -> Muted
+            }
+            Text(message, color = stateColor, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+
+            if (checking) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    CircularProgressIndicator(Modifier.size(24.dp), color = Gold, strokeWidth = 3.dp)
+                    Text("GitHub Releases kontrol ediliyor…", color = Muted, fontSize = 13.sp)
                 }
-                Text("APK: ${r.apkName}", color = Muted, fontSize = 12.sp)
             }
+
+            release?.let { r ->
+                Text("ULAK v${r.version}", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                if (r.notes.isNotBlank()) {
+                    Text(r.notes.take(520), color = Color.White.copy(alpha = 0.86f), fontSize = 13.sp, maxLines = 5, overflow = TextOverflow.Ellipsis)
+                }
+            }
+
             if (downloading) {
-                CircularProgressIndicator(Modifier.size(28.dp), color = Gold)
-                Text("İndiriliyor… %$progress", color = Gold, fontSize = 14.sp)
+                Text("Güncelleme indiriliyor  •  %$progress", color = Gold, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                Box(
+                    Modifier.fillMaxWidth().height(8.dp)
+                        .background(Color(0xFF2A2E33), RoundedCornerShape(99.dp))
+                ) {
+                    Box(
+                        Modifier.fillMaxWidth((progress.coerceIn(0, 100) / 100f))
+                            .fillMaxHeight()
+                            .background(Gold, RoundedCornerShape(99.dp))
+                    )
+                }
+                Text("İndirme tamamlanınca Android TV kurulum onayı açılır.", color = Color.White.copy(alpha = 0.78f), fontSize = 12.sp)
             }
+
+            downloadedApk?.let {
+                Text("✓ Güncelleme indirildi • kurulum hazırlanıyor.", color = Color(0xFF81C784), fontSize = 13.sp)
+            }
+
             error?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 14.sp) }
         }
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Button(enabled = !checking && !downloading, onClick = { check() }) {
-                Text(if (checking) "KONTROL EDİLİYOR…" else "GÜNCELLEMELERİ KONTROL ET")
-            }
+            UlakActionButton(if (checking) "KONTROL EDİLİYOR…" else "YENİDEN KONTROL ET", enabled = !checking && !downloading, onClick = { check() })
             release?.let { r ->
-                Button(enabled = !checking && !downloading, onClick = {
+                UlakActionButton("İNDİR VE GÜNCELLE", enabled = !checking && !downloading, onClick = {
                     downloading = true
                     progress = 0
                     error = null
+                    message = "v${r.version} indiriliyor…"
                     scope.launch {
                         GitHubUpdateManager.downloadApk(context, r) { progress = it }
                             .onSuccess { file ->
                                 downloadedApk = file
-                                message = "APK hazır. Kurulum ekranını açabilirsin."
+                                message = "v${r.version} indirildi • kuruluma hazır"
                                 if (GitHubUpdateManager.canInstallPackages(context)) {
                                     runCatching { GitHubUpdateManager.launchInstaller(context, file) }
                                         .onFailure { error = it.message ?: "Kurulum ekranı açılamadı." }
                                 } else {
-                                    message = "ULAK için uygulama yükleme izni gerekli. İzni açıp geri dön ve KUR'u seç."
+                                    message = "Kurulum izni gerekli • izni açıp ULAK'a geri dön"
                                     GitHubUpdateManager.openInstallPermission(context)
                                 }
                             }
-                            .onFailure { error = it.message ?: "APK indirilemedi." }
+                            .onFailure {
+                                error = it.message ?: "APK indirilemedi."
+                                message = "Güncelleme indirilemedi"
+                            }
                         downloading = false
                     }
-                }) { Text("İNDİR VE GÜNCELLE") }
+                })
             }
             downloadedApk?.let { file ->
-                Button(enabled = !downloading, onClick = {
+                UlakActionButton("KUR", enabled = !downloading, onClick = {
                     if (GitHubUpdateManager.canInstallPackages(context)) {
                         runCatching { GitHubUpdateManager.launchInstaller(context, file) }
                             .onFailure { error = it.message ?: "Kurulum ekranı açılamadı." }
                     } else {
                         GitHubUpdateManager.openInstallPermission(context)
                     }
-                }) { Text("KUR") }
+                })
             }
-            Button(enabled = !downloading, onClick = onBack) { Text("GERİ") }
+            UlakActionButton("GERİ", enabled = !downloading, onClick = onBack)
         }
 
-        Text(
-            "Kaynak: github.com/yasinozyapi8/ULAK • Releases/latest",
-            color = Muted,
-            fontSize = 12.sp
-        )
+    }
+}
+
+@Composable
+private fun UlakActionButton(
+    text: String,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val bg = when {
+        !enabled -> Color(0xFF202328)
+        focused -> Gold
+        else -> Color(0xFF2A2E33)
+    }
+    val fg = when {
+        !enabled -> Color(0xFF737980)
+        focused -> Color.Black
+        else -> Color.White
+    }
+    Box(
+        Modifier
+            .onFocusChanged { focused = it.isFocused }
+            .background(bg, RoundedCornerShape(22.dp))
+            .border(if (focused) 3.dp else 1.dp, if (focused) Color.White else Color(0xFF555B62), RoundedCornerShape(22.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .focusable(enabled)
+            .padding(horizontal = 22.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = fg, fontWeight = FontWeight.Bold, fontSize = 14.sp)
     }
 }
 
@@ -428,19 +770,29 @@ private fun XtreamLoginScreen(
     var loading by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedTextColor = Color.White,
+        unfocusedTextColor = Color.White,
+        focusedLabelColor = Gold,
+        unfocusedLabelColor = Color.White,
+        focusedBorderColor = Gold,
+        unfocusedBorderColor = Color(0xFF8C9299),
+        cursorColor = Gold
+    )
 
     BackHandler(enabled = !loading, onBack = onBack)
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(28.dp)) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Xtream Codes Girişi", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            Text("Bilgiler bu cihazda kaydedilir; parola Android Keystore ile şifrelenir.", color = Muted)
-            OutlinedTextField(profileName, { profileName = it }, label = { Text("Profil adı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(server, { server = it; error = null }, label = { Text("Sunucu URL") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(username, { username = it; error = null }, label = { Text("Kullanıcı adı") }, singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(password, { password = it; error = null }, label = { Text("Parola") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
-            error?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 14.sp) }
+    Row(Modifier.fillMaxWidth().fillMaxHeight(), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+        Column(Modifier.weight(1f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Xtream Codes Girişi", color = Color.White, fontSize = 27.sp, fontWeight = FontWeight.Bold)
+            Text("Bilgiler bu cihazda güvenli şekilde saklanır.", color = Color.White.copy(alpha = 0.82f), fontSize = 13.sp)
+            OutlinedTextField(profileName, { profileName = it }, label = { Text("Profil adı") }, singleLine = true, textStyle = LocalTextStyle.current.copy(color = Color.White), colors = fieldColors, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(server, { server = it; error = null }, label = { Text("Sunucu URL") }, singleLine = true, textStyle = LocalTextStyle.current.copy(color = Color.White), colors = fieldColors, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(username, { username = it; error = null }, label = { Text("Kullanıcı adı") }, singleLine = true, textStyle = LocalTextStyle.current.copy(color = Color.White), colors = fieldColors, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(password, { password = it; error = null }, label = { Text("Parola") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), textStyle = LocalTextStyle.current.copy(color = Color.White), colors = fieldColors, modifier = Modifier.fillMaxWidth())
+            error?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 13.sp) }
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Button(
+                UlakActionButton(
+                    if (loading) "BAĞLANIYOR…" else "GİRİŞ YAP VE KAYDET",
                     enabled = !loading && server.isNotBlank() && username.isNotBlank() && password.isNotBlank(),
                     onClick = {
                         loading = true; error = null
@@ -451,18 +803,18 @@ private fun XtreamLoginScreen(
                             loading = false
                         }
                     }
-                ) { Text(if (loading) "BAĞLANIYOR…" else "GİRİŞ YAP VE KAYDET") }
-                Button(onClick = onBack, enabled = !loading) { Text("GERİ") }
+                )
+                UlakActionButton("GERİ", enabled = !loading, onClick = onBack)
                 if (loading) CircularProgressIndicator(Modifier.size(28.dp), color = Gold)
             }
         }
         Column(
-            Modifier.width(330.dp).background(Card, RoundedCornerShape(18.dp)).padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            Modifier.width(300.dp).background(Card, RoundedCornerShape(18.dp)).padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             Text("ULAK PROFİL", color = Gold, fontWeight = FontWeight.Bold)
-            Text("Bir kez giriş yaptıktan sonra aynı bilgileri tekrar yazmana gerek kalmaz.", color = Color.White, fontSize = 15.sp)
-            Text("• Sunucu ve kullanıcı bilgisi yerelde saklanır\n• Parola şifreli tutulur\n• Açılışta kayıtlı profil hazır gelir", color = Muted, fontSize = 13.sp)
+            Text("Bir kez giriş yaptıktan sonra aynı bilgileri tekrar yazmana gerek kalmaz.", color = Color.White, fontSize = 14.sp)
+            Text("• Sunucu ve kullanıcı bilgisi yerelde saklanır\n• Parola şifreli tutulur\n• Açılışta kayıtlı profil hazır gelir", color = Color.White.copy(alpha = 0.78f), fontSize = 12.sp)
         }
     }
 }
@@ -494,14 +846,40 @@ private fun M3uLoginScreen(onLoaded: (List<Channel>) -> Unit, onBack: () -> Unit
 }
 
 @Composable
-private fun ChannelBrowserScreen(channels: List<Channel>, onPlay: (Channel) -> Unit, onBack: () -> Unit) {
+private fun ChannelBrowserScreen(
+    channels: List<Channel>,
+    initialGroup: String,
+    initialSelectedUrl: String?,
+    titleOverride: String? = null,
+    favoriteIds: Set<String> = emptySet(),
+    onToggleFavorite: (Channel) -> Unit = {},
+    onSelectionChanged: (String, Channel?) -> Unit,
+    onPlay: (Channel) -> Unit,
+    onBack: () -> Unit
+) {
     BackHandler(onBack = onBack)
-    var selectedGroup by remember(channels) { mutableStateOf("Tümü") }
-    var selectedChannel by remember(channels) { mutableStateOf(channels.firstOrNull()) }
-    val groupCounts = remember(channels) { channels.groupingBy { it.group ?: "Diğer" }.eachCount() }
-    val groups = remember(channels) { listOf("Tümü") + channels.map { it.group ?: "Diğer" }.distinct().sorted() }
-    val visibleChannels = remember(channels, selectedGroup) { if (selectedGroup == "Tümü") channels else channels.filter { (it.group ?: "Diğer") == selectedGroup } }
-    LaunchedEffect(selectedGroup) { selectedChannel = visibleChannels.firstOrNull() }
+    val orderedChannels = remember(channels) {
+        channels.sortedWith(compareBy<Channel> { it.categoryOrder ?: Int.MAX_VALUE }.thenBy { it.serverOrder ?: Int.MAX_VALUE })
+    }
+    val groups = remember(orderedChannels, titleOverride) {
+        if (titleOverride != null) listOf(titleOverride) else listOf("Tümü") + orderedChannels.groupBy { it.group ?: "Diğer" }.entries
+            .sortedBy { (_, items) -> items.minOfOrNull { it.categoryOrder ?: Int.MAX_VALUE } ?: Int.MAX_VALUE }
+            .map { it.key }
+    }
+    var selectedGroup by remember(channels, initialGroup, groups) { mutableStateOf(initialGroup.takeIf { it in groups } ?: groups.firstOrNull() ?: "Tümü") }
+    val groupCounts = remember(orderedChannels) { orderedChannels.groupingBy { it.group ?: "Diğer" }.eachCount() }
+    val visibleChannels = remember(orderedChannels, selectedGroup, titleOverride) { if (titleOverride != null || selectedGroup == "Tümü") orderedChannels else orderedChannels.filter { (it.group ?: "Diğer") == selectedGroup } }
+    var selectedChannel by remember(channels, selectedGroup, initialSelectedUrl) {
+        mutableStateOf(visibleChannels.firstOrNull { it.streamUrl == initialSelectedUrl } ?: visibleChannels.firstOrNull())
+    }
+    val initialIndex = remember(visibleChannels, initialSelectedUrl) { visibleChannels.indexOfFirst { it.streamUrl == initialSelectedUrl }.coerceAtLeast(0) }
+    val channelListState = rememberLazyListState(initialFirstVisibleItemIndex = (initialIndex - 2).coerceAtLeast(0))
+
+    LaunchedEffect(selectedGroup) {
+        val keep = visibleChannels.firstOrNull { it.streamUrl == selectedChannel?.streamUrl }
+        if (keep == null) selectedChannel = visibleChannels.firstOrNull()
+        onSelectionChanged(selectedGroup, selectedChannel)
+    }
 
     Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
         HeroChannelPanel(selectedChannel, visibleChannels.size)
@@ -510,8 +888,13 @@ private fun ChannelBrowserScreen(channels: List<Channel>, onPlay: (Channel) -> U
                 item { Text("KATEGORİLER", color = Gold, fontSize = 14.sp, fontWeight = FontWeight.Bold); Spacer(Modifier.height(6.dp)) }
                 items(groups) { group ->
                     val selected = group == selectedGroup
-                    val count = if (group == "Tümü") channels.size else groupCounts[group] ?: 0
-                    FocusRow(selected, { selectedGroup = group }, Modifier.fillMaxWidth()) {
+                    val count = if (titleOverride != null || group == "Tümü") channels.size else groupCounts[group] ?: 0
+                    FocusRow(selected, {
+                        selectedGroup = group
+                        val next = if (titleOverride != null || group == "Tümü") orderedChannels.firstOrNull { it.streamUrl == initialSelectedUrl } ?: orderedChannels.firstOrNull() else orderedChannels.firstOrNull { (it.group ?: "Diğer") == group }
+                        selectedChannel = next
+                        onSelectionChanged(group, next)
+                    }, Modifier.fillMaxWidth()) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                             Text(group, color = if (selected) Gold else Color.White, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(count.toString(), color = if (selected) Gold else Muted, fontSize = 11.sp)
@@ -522,13 +905,20 @@ private fun ChannelBrowserScreen(channels: List<Channel>, onPlay: (Channel) -> U
             Column(Modifier.weight(1f).fillMaxHeight()) {
                 Text("$selectedGroup  •  ${visibleChannels.size} kanal", color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(9.dp))
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                LazyColumn(state = channelListState, verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     items(visibleChannels, key = { it.streamUrl }) { channel ->
-                        ChannelRow(channel, selectedChannel?.streamUrl == channel.streamUrl, { selectedChannel = channel }) { onPlay(channel) }
+                        ChannelRow(channel, selectedChannel?.streamUrl == channel.streamUrl, channel.favoriteKey() in favoriteIds, {
+                            selectedChannel = channel
+                            onSelectionChanged(selectedGroup, channel)
+                        }) {
+                            selectedChannel = channel
+                            onSelectionChanged(selectedGroup, channel)
+                            onPlay(channel)
+                        }
                     }
                 }
             }
-            ChannelInfoPanel(selectedChannel, Modifier.width(285.dp).fillMaxHeight())
+            ChannelInfoPanel(selectedChannel, selectedChannel?.favoriteKey() in favoriteIds, { selectedChannel?.let(onToggleFavorite) }, Modifier.width(285.dp).fillMaxHeight())
         }
     }
 }
@@ -563,7 +953,7 @@ private fun FocusRow(selected: Boolean, onClick: () -> Unit, modifier: Modifier 
 }
 
 @Composable
-private fun ChannelRow(channel: Channel, selected: Boolean, onFocused: () -> Unit, onClick: () -> Unit) {
+private fun ChannelRow(channel: Channel, selected: Boolean, favorite: Boolean, onFocused: () -> Unit, onClick: () -> Unit) {
     var focused by remember { mutableStateOf(false) }
     Row(
         Modifier.fillMaxWidth().onFocusChanged { focused = it.isFocused; if (it.isFocused) onFocused() }
@@ -580,12 +970,12 @@ private fun ChannelRow(channel: Channel, selected: Boolean, onFocused: () -> Uni
             Text(channel.name, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(channel.group ?: "Diğer", color = Muted, fontSize = 11.sp, maxLines = 1)
         }
-        Text(if (focused) "▶" else streamType(channel.streamUrl), color = if (focused) Gold else Muted, fontSize = 11.sp)
+        Text(if (favorite) "★" else if (focused) "▶" else streamType(channel.streamUrl), color = if (favorite || focused) Gold else Muted, fontSize = 13.sp)
     }
 }
 
 @Composable
-private fun ChannelInfoPanel(channel: Channel?, modifier: Modifier = Modifier) {
+private fun ChannelInfoPanel(channel: Channel?, favorite: Boolean, onToggleFavorite: () -> Unit, modifier: Modifier = Modifier) {
     Column(modifier.background(Card, RoundedCornerShape(16.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("KANAL BİLGİSİ", color = Gold, fontSize = 14.sp, fontWeight = FontWeight.Bold)
         if (channel == null) { Text("Bir kanal seç.", color = Muted); return@Column }
@@ -597,6 +987,7 @@ private fun ChannelInfoPanel(channel: Channel?, modifier: Modifier = Modifier) {
         InfoLine("Kategori", channel.group ?: "Diğer")
         InfoLine("Yayın", streamType(channel.streamUrl))
         if (!channel.tvgId.isNullOrBlank()) InfoLine("EPG ID", channel.tvgId!!)
+        UlakActionButton(if (favorite) "★ FAVORİDEN ÇIKAR" else "☆ FAVORİYE EKLE", onClick = onToggleFavorite)
         Spacer(Modifier.weight(1f))
         Text("Gerçek EPG program bilgisi sonraki sürümde.", color = Muted, fontSize = 11.sp)
     }
@@ -616,8 +1007,23 @@ private fun streamType(url: String): String = when {
     else -> "AUTO"
 }
 
-private fun playbackCandidates(channel: Channel): List<String> =
-    (listOf(channel.streamUrl) + channel.alternateStreamUrls).distinct()
+private fun playbackCandidates(channel: Channel): List<String> {
+    val all = (listOf(channel.streamUrl) + channel.alternateStreamUrls).distinct()
+    // RAW gruplarında HLS görüntü verip audio track taşımayabiliyor. Sunucudaki
+    // testlerde /live/*.ts yolu 200 + video/mp2t verdiği için RAW kanallarda
+    // gerçek MPEG-TS /live yolunu önce dene; diğer kanallarda sağlayıcı sırasını koru.
+    if (!channel.name.contains("RAW", ignoreCase = true) &&
+        !(channel.group?.contains("RAW", ignoreCase = true) == true)) return all
+    return all.sortedWith(compareBy<String> {
+        when {
+            it.contains(".ts", true) && it.contains("/live/", true) -> 0
+            it.contains(".ts", true) -> 1
+            it.contains(".m3u8", true) && it.contains("/live/", true) -> 2
+            it.contains(".m3u8", true) -> 3
+            else -> 4
+        }
+    })
+}
 
 private fun safeError(error: PlaybackException): String {
     var cause: Throwable? = error
@@ -684,6 +1090,10 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     var playbackGeneration by remember { mutableIntStateOf(0) }
     var useVlc by remember { mutableStateOf(false) }
     var vlcStatus by remember { mutableStateOf("VLC bekliyor") }
+    var detectedVideoCodec by remember { mutableStateOf("BEKLENİYOR") }
+    var smartDecision by remember { mutableStateOf("Analiz ediliyor") }
+    var firstFrameRendered by remember { mutableStateOf(false) }
+    var vlcTriedForCandidate by remember { mutableStateOf(false) }
     val playerScope = rememberCoroutineScope()
 
     // Keep the default ExoPlayer renderer/buffer behavior, but use an HTTP
@@ -691,7 +1101,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     // generic/empty user agents even when the account itself is valid.
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.2.0")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.2.9")
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(
                 mapOf(
@@ -741,10 +1151,20 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
 
         val vf = player.videoFormat
         videoInfo = if (vf != null) {
-            val codec = vf.sampleMimeType?.substringAfter('/')?.uppercase() ?: "?"
+            val mime = vf.sampleMimeType.orEmpty()
+            val codec = when {
+                mime.contains("hevc", true) || mime.contains("h265", true) -> "HEVC / H.265"
+                mime.contains("avc", true) || mime.contains("h264", true) -> "AVC / H.264"
+                mime.isNotBlank() -> mime.substringAfter('/').uppercase()
+                else -> "?"
+            }
+            detectedVideoCodec = codec
             val size = if (vf.width > 0 && vf.height > 0) "${vf.width}×${vf.height}" else "çözünürlük ?"
             "Video: $codec • $size"
-        } else "Video: algılanmadı"
+        } else {
+            detectedVideoCodec = "ALGILANMADI"
+            "Video: algılanmadı"
+        }
     }
 
     fun playUrl(url: String) {
@@ -755,6 +1175,10 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         }
         useVlc = false
         vlcStatus = "VLC bekliyor"
+        detectedVideoCodec = "BEKLENİYOR"
+        smartDecision = "ExoPlayer ile analiz ediliyor"
+        firstFrameRendered = false
+        vlcTriedForCandidate = false
         activeUrl = url
         playbackError = null
         status = "Yayın hazırlanıyor…"
@@ -771,14 +1195,17 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         showOverlay()
     }
 
-    fun switchToVlc(url: String) {
+    fun switchToVlc(url: String, reason: String) {
+        if (useVlc || vlcTriedForCandidate) return
+        vlcTriedForCandidate = true
         player.stop()
         player.clearMediaItems()
         activeUrl = url
         useVlc = true
+        smartDecision = "LibVLC seçildi • $reason"
         vlcStatus = "VLC video motoru başlatılıyor…"
         playbackError = null
-        status = "VLC uyumluluk modu"
+        status = "Akıllı oynatıcı • VLC"
         videoInfo = "Video: VLC ile deneniyor"
         showOverlay()
     }
@@ -840,16 +1267,63 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                     updateDiagnostics()
                     val generationAtReady = playbackGeneration
                     val candidateAtReady = candidateIndex
+                    val urlAtReady = activeUrl
                     playerScope.launch {
-                        delay(5000)
-                        if (generationAtReady != playbackGeneration || candidateAtReady != candidateIndex) return@launch
+                        delay(2500)
+                        if (generationAtReady != playbackGeneration || candidateAtReady != candidateIndex || useVlc) return@launch
                         updateDiagnostics()
                         val hasAudio = player.audioFormat != null
                         val hasVideo = player.videoFormat != null
-                        if (hasAudio && !hasVideo) {
-                            val reason = "Ses var, Media3 video track/decoder oluşturamadı (5 sn)"
-                            attemptLog = attemptLog + "${streamType(activeUrl)}: $reason → VLC"
-                            switchToVlc(activeUrl)
+                        val isHevc = detectedVideoCodec.contains("HEVC", true) || detectedVideoCodec.contains("H.265", true)
+                        when {
+                            firstFrameRendered -> {
+                                smartDecision = if (isHevc) "TV HEVC'yi çözdü • ExoPlayer" else "AVC/uyumlu video • ExoPlayer"
+                            }
+                            isHevc && hasVideo -> {
+                                val reason = "HEVC algılandı, ilk video karesi oluşmadı"
+                                attemptLog = attemptLog + "${streamType(urlAtReady)}: $reason → VLC"
+                                switchToVlc(urlAtReady, reason)
+                            }
+                            hasAudio && !hasVideo -> {
+                                val reason = "Ses var, video track/decoder yok"
+                                attemptLog = attemptLog + "${streamType(urlAtReady)}: $reason → VLC"
+                                switchToVlc(urlAtReady, reason)
+                            }
+                        }
+                    }
+                    playerScope.launch {
+                        delay(5000)
+                        if (generationAtReady != playbackGeneration || candidateAtReady != candidateIndex || useVlc || firstFrameRendered) return@launch
+                        updateDiagnostics()
+                        val hasAudio = player.audioFormat != null
+                        if (hasAudio) {
+                            val reason = "5 sn içinde görüntü oluşmadı"
+                            attemptLog = attemptLog + "${streamType(urlAtReady)}: $reason → VLC"
+                            switchToVlc(urlAtReady, reason)
+                        }
+                    }
+                    playerScope.launch {
+                        delay(4500)
+                        if (generationAtReady != playbackGeneration || candidateAtReady != candidateIndex || useVlc) return@launch
+                        updateDiagnostics()
+                        val hasAudio = player.audioFormat != null
+                        if (firstFrameRendered && !hasAudio) {
+                            // A visible video with no Media3 audio track usually means the current
+                            // HLS/TS variant does not expose an audio stream. Jumping directly into
+                            // LibVLC on some older Android TV devices can crash inside native VLC.
+                            // Try the next Xtream URL with Media3 first. If no alternative remains,
+                            // keep the video alive and report the stream as silent instead of
+                            // tearing down the working decoder.
+                            val reason = "Görüntü var fakat 4.5 sn içinde ses akışı algılanmadı"
+                            val moved = tryNextCandidate("$reason • alternatif yayın aranıyor")
+                            if (!moved) {
+                                status = "Canlı yayın • ses akışı yok"
+                                smartDecision = "Video korunuyor • ses akışı bulunamadı"
+                                audioInfo = "Ses: yayın akışı yok / algılanmadı"
+                                playbackError = null
+                                attemptLog = attemptLog + "${streamType(urlAtReady)}: $reason • VLC güvenlik nedeniyle denenmedi"
+                                showOverlay()
+                            }
                         }
                     }
                 }
@@ -857,6 +1331,21 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
 
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
                 updateDiagnostics()
+                if (!useVlc && detectedVideoCodec.contains("AVC", true)) {
+                    smartDecision = "AVC / H.264 • ExoPlayer"
+                } else if (!useVlc && detectedVideoCodec.contains("HEVC", true)) {
+                    smartDecision = "HEVC algılandı • TV decoder testi"
+                }
+            }
+
+            override fun onRenderedFirstFrame() {
+                firstFrameRendered = true
+                updateDiagnostics()
+                smartDecision = when {
+                    detectedVideoCodec.contains("HEVC", true) -> "TV HEVC'yi çözdü • ExoPlayer"
+                    detectedVideoCodec.contains("AVC", true) -> "AVC / H.264 • ExoPlayer"
+                    else -> "Video aktif • ExoPlayer"
+                }
             }
 
             override fun onPlayerError(error: PlaybackException) {
@@ -912,24 +1401,31 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                                     VlcMediaPlayer.Event.Playing -> {
                                         vlcStatus = "VLC oynatıyor"
                                         status = "Canlı yayın • VLC"
+                                        smartDecision = "LibVLC • uyumluluk motoru aktif"
                                         videoInfo = "Video: VLC yazılım/uyumluluk motoru"
                                     }
                                     VlcMediaPlayer.Event.Vout -> {
                                         vlcStatus = "VLC video çıkışı aktif"
+                                        smartDecision = "LibVLC • video çıkışı aktif"
                                         videoInfo = "Video: VLC çıkışı aktif"
                                     }
                                     VlcMediaPlayer.Event.EncounteredError -> {
                                         vlcStatus = "VLC yayın hatası"
-                                        playbackError = "Media3 görüntü üretemedi; VLC de bu akışı oynatamadı."
-                                        status = "VLC yayın hatası"
-                                        showOverlay()
+                                        val reason = "LibVLC de bu yayın yolunu oynatamadı"
+                                        attemptLog = attemptLog + "${streamType(activeUrl)}: $reason"
+                                        if (!tryNextCandidate(reason)) {
+                                            playbackError = "Media3 ve LibVLC yayın alternatiflerini tüketti."
+                                            status = "Yayın açılamadı"
+                                            smartDecision = "Tüm oynatma yolları başarısız"
+                                            showOverlay()
+                                        }
                                     }
                                 }
                             }
                             val media = Media(libVlc, Uri.parse(activeUrl)).apply {
                                 setHWDecoderEnabled(true, false)
                                 addOption(":network-caching=1500")
-                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.2.0")
+                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.2.9")
                             }
                             vlcPlayer.media = media
                             media.release()
@@ -1043,9 +1539,12 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                         Text("Teknik Bilgiler", color = Gold, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(2.dp))
                         TechnicalLine("Video", videoInfo.removePrefix("Video: "))
+                        TechnicalLine("Codec", detectedVideoCodec)
                         TechnicalLine("Ses", audioInfo.removePrefix("Ses: "))
+                        TechnicalLine("Audio track", if (useVlc) "VLC motorunda" else if (player.audioFormat != null) "1 • var" else "0 • yok")
                         TechnicalLine("Yayın", streamType(activeUrl))
                         TechnicalLine("Motor", if (useVlc) "LibVLC" else "Media3 / ExoPlayer")
+                        TechnicalLine("Akıllı seçim", smartDecision)
                         TechnicalLine("Durum", status)
                         TechnicalLine("Yol", "${candidateIndex + 1}/${candidates.size}")
                         if (attemptLog.isNotEmpty()) {
