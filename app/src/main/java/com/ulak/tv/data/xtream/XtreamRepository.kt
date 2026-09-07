@@ -47,7 +47,7 @@ object XtreamRepository {
                 readTimeout = 10_000
                 requestMethod = "GET"
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "ULAK/0.3.4 AndroidTV")
+                setRequestProperty("User-Agent", "ULAK/0.3.5 AndroidTV")
                 setRequestProperty("Accept", "*/*")
                 setRequestProperty("Connection", "keep-alive")
                 setRequestProperty("Range", "bytes=0-2047")
@@ -280,7 +280,7 @@ object XtreamRepository {
             readTimeout = 30_000
             instanceFollowRedirects = true
             requestMethod = "GET"
-            setRequestProperty("User-Agent", "ULAK/0.3.4 AndroidTV")
+            setRequestProperty("User-Agent", "ULAK/0.3.5 AndroidTV")
             setRequestProperty("Accept", "application/json, */*")
         }
         return try {

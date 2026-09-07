@@ -1,6 +1,7 @@
 package com.ulak.tv
 
 import android.os.Bundle
+import android.content.Intent
 import android.net.Uri
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
@@ -80,6 +81,21 @@ private sealed interface Screen {
     data object Update : Screen
     data class Player(val index: Int) : Screen
     data class ProbePlayer(val channel: Channel) : Screen
+}
+
+private fun isRawChannel(channel: Channel): Boolean =
+    channel.name.contains("RAW", ignoreCase = true) ||
+        (channel.group?.contains("RAW", ignoreCase = true) == true)
+
+private fun launchRawVlcPlayer(context: android.content.Context, channel: Channel) {
+    val urls = playbackCandidates(channel).take(8).toTypedArray()
+    val intent = Intent(context, RawVlcPlayerActivity::class.java).apply {
+        putExtra(RawVlcPlayerActivity.EXTRA_NAME, channel.name)
+        putExtra(RawVlcPlayerActivity.EXTRA_GROUP, channel.group ?: "RAW")
+        putExtra(RawVlcPlayerActivity.EXTRA_LOGO, channel.logoUrl)
+        putExtra(RawVlcPlayerActivity.EXTRA_URLS, urls)
+    }
+    context.startActivity(intent)
 }
 
 class MainActivity : ComponentActivity() {
@@ -258,7 +274,16 @@ fun UlakApp() {
                     favoriteIds = favoriteIds,
                     onToggleFavorite = { channel -> favoritesStore.toggle(channel); favoriteIds = favoritesStore.ids() },
                     onSelectionChanged = { _, channel -> browserSelectedUrl = channel?.streamUrl },
-                    onPlay = { channel -> browserSelectedUrl = channel.streamUrl; val index = channels.indexOfFirst { it.streamUrl == channel.streamUrl }; playerBackScreen = Screen.Favorites; screen = Screen.Player(index.coerceAtLeast(0)) },
+                    onPlay = { channel ->
+                        browserSelectedUrl = channel.streamUrl
+                        if (isRawChannel(channel)) {
+                            launchRawVlcPlayer(context, channel)
+                        } else {
+                            val index = channels.indexOfFirst { it.streamUrl == channel.streamUrl }
+                            playerBackScreen = Screen.Favorites
+                            screen = Screen.Player(index.coerceAtLeast(0))
+                        }
+                    },
                     onBack = { screen = Screen.Home }
                 )
                 Screen.Channels -> ChannelBrowserScreen(
@@ -273,9 +298,13 @@ fun UlakApp() {
                     },
                     onPlay = { channel ->
                         browserSelectedUrl = channel.streamUrl
-                        val index = channels.indexOfFirst { it.streamUrl == channel.streamUrl }
-                        playerBackScreen = Screen.Channels
-                        screen = Screen.Player(index.coerceAtLeast(0))
+                        if (isRawChannel(channel)) {
+                            launchRawVlcPlayer(context, channel)
+                        } else {
+                            val index = channels.indexOfFirst { it.streamUrl == channel.streamUrl }
+                            playerBackScreen = Screen.Channels
+                            screen = Screen.Player(index.coerceAtLeast(0))
+                        }
                     },
                     onBack = { screen = channelBackScreen }
                 )
@@ -300,7 +329,7 @@ private fun Header(profileName: String?) {
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(profileName ?: "Profil yok", color = if (profileName != null) Color.White else Muted, fontSize = 13.sp)
-            Text("v0.3.4", color = Muted, fontSize = 12.sp)
+            Text("v0.3.5", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -1123,7 +1152,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     // generic/empty user agents even when the account itself is valid.
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.4")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.5")
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(
                 mapOf(
@@ -1137,7 +1166,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         val mediaSourceFactory = DefaultMediaSourceFactory(context)
             .setDataSourceFactory(httpFactory)
 
-        // v0.3.4: RAW kanallarda PMT içinde MPEG-1/2 Audio PID bulunduğu halde
+        // v0.3.5: RAW kanallarda PMT içinde MPEG-1/2 Audio PID bulunduğu halde
         // Android TV'nin platform decoder'ı audio/mpeg-L2 formatını her cihazda
         // desteklemek zorunda değil. FFmpeg audio renderer'ını platform decoder'ından
         // önce tercih ediyoruz. Normal H.264/H.265 video yine Media3/MediaCodec ile
@@ -1381,7 +1410,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             // tearing down the working decoder.
                             val reason = "Görüntü var fakat 4.5 sn içinde ses akışı algılanmadı"
                             if (isRawChannel) {
-                                // v0.3.4: RAW kanalda görüntü zaten çalışıyorsa ikinci bir HTTP
+                                // v0.3.5: RAW kanalda görüntü zaten çalışıyorsa ikinci bir HTTP
                                 // bağlantısı açıp PAT/PMT analizi yapma ve aynı kanal için diğer
                                 // Xtream URL'lerine sıçrama. Bazı IPTV sunucuları ikinci eşzamanlı
                                 // bağlantıyı görünce ilk canlı bağlantıyı kapatıyor. Önceki teşhiste
@@ -1506,7 +1535,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             val media = Media(libVlc, Uri.parse(activeUrl)).apply {
                                 setHWDecoderEnabled(true, false)
                                 addOption(":network-caching=1500")
-                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.4")
+                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.5")
                             }
                             vlcPlayer.media = media
                             media.release()
