@@ -298,7 +298,7 @@ private fun Header(profileName: String?) {
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(profileName ?: "Profil yok", color = if (profileName != null) Color.White else Muted, fontSize = 13.sp)
-            Text("v0.2.8", color = Muted, fontSize = 12.sp)
+            Text("v0.3.1.1", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -456,12 +456,11 @@ private fun StreamDiagnosticsScreen(
     var testing by remember { mutableStateOf(false) }
     var results by remember { mutableStateOf<List<XtreamRepository.StreamProbeResult>>(emptyList()) }
     var message by remember { mutableStateOf("Bir kanal seçip TEST ET'e bas.") }
-    val playableResult = results.firstOrNull { it.ok }
-    val playableTsLive = results.firstOrNull { it.ok && it.label == "TS /live" }
+    val playableResults = results.filter { it.ok }
 
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Xtream Yayın Testi", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-        Text("Xtream'in direct_source / stream_source ipuçlarını ve standart HLS/TS yollarını ayrı ayrı gösterir. 200/206 bulunan kaynağı oynatıp gerçek video + audio track sonucunu kontrol et.", color = Muted, fontSize = 12.sp)
+        Text("Xtream'in direct_source / stream_source ipuçlarını ve standart HLS/TS yollarını ayrı ayrı gösterir. 200/206 bulunan HLS ve TS kaynaklarını ayrı ayrı oynatıp gerçek video + audio track sonucunu karşılaştır.", color = Muted, fontSize = 12.sp)
         Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
             Column(Modifier.weight(1f).fillMaxHeight().background(Card, RoundedCornerShape(16.dp)).padding(12.dp)) {
                 Text("KANALLAR • ${ordered.size}", color = Gold, fontWeight = FontWeight.Bold, fontSize = 13.sp)
@@ -509,29 +508,35 @@ private fun StreamDiagnosticsScreen(
                         }
                     }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    UlakActionButton(if (testing) "TEST EDİLİYOR…" else "TEST ET", enabled = !testing && selected != null, onClick = {
-                        val channel = selected ?: return@UlakActionButton
-                        testing = true
-                        results = emptyList()
-                        message = "Yayın yolları kontrol ediliyor…"
-                        scope.launch {
-                            XtreamRepository.probeChannel(channel)
-                                .onSuccess { out ->
-                                    results = out
-                                    val working = out.filter { it.ok }
-                                    message = if (working.isNotEmpty()) "${working.size}/${out.size} yol sunucu tarafından kabul edildi." else "Hiçbir yol kabul edilmedi."
-                                }
-                                .onFailure { message = it.message ?: "Test başarısız." }
-                            testing = false
-                        }
-                    })
-                    if (playableTsLive != null && selected != null) {
-                        UlakActionButton("TS /LIVE OYNAT", onClick = { onPlayTest(selected!!, playableTsLive.url) })
-                    } else if (playableResult != null && selected != null) {
-                        UlakActionButton("ÇALIŞAN YOLU OYNAT", onClick = { onPlayTest(selected!!, playableResult.url) })
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        UlakActionButton(if (testing) "TEST EDİLİYOR…" else "TEST ET", enabled = !testing && selected != null, onClick = {
+                            val channel = selected ?: return@UlakActionButton
+                            testing = true
+                            results = emptyList()
+                            message = "Yayın yolları kontrol ediliyor…"
+                            scope.launch {
+                                XtreamRepository.probeChannel(channel)
+                                    .onSuccess { out ->
+                                        results = out
+                                        val working = out.filter { it.ok }
+                                        message = if (working.isNotEmpty()) "${working.size}/${out.size} yol sunucu tarafından kabul edildi." else "Hiçbir yol kabul edilmedi."
+                                    }
+                                    .onFailure { message = it.message ?: "Test başarısız." }
+                                testing = false
+                            }
+                        })
+                        UlakActionButton("GERİ", onClick = onBack)
                     }
-                    UlakActionButton("GERİ", onClick = onBack)
+                    if (playableResults.isNotEmpty() && selected != null) {
+                        Text("ÇALIŞAN YOLLAR", color = Gold, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        playableResults.forEach { result ->
+                            UlakActionButton(
+                                "${result.label.uppercase()} • OYNAT",
+                                onClick = { onPlayTest(selected!!, result.url) }
+                            )
+                        }
+                    }
                 }
             }
         }
