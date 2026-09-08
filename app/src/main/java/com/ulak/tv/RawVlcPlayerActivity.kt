@@ -1,13 +1,14 @@
 package com.ulak.tv
 
 import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Bundle
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.widget.FrameLayout
-import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
@@ -17,14 +18,10 @@ import org.videolan.libvlc.MediaPlayer
 import org.videolan.libvlc.util.VLCVideoLayout
 
 /**
- * v0.3.5 RAW player.
+ * v0.3.5.1 RAW player.
  *
- * RAW streams are deliberately hosted in a separate Android process. This keeps
- * the Compose/Media3 process isolated from native LibVLC failures and avoids the
- * attach/detach race we saw when VLC lived inside AndroidView.
- *
- * This is an original ULAK implementation inspired only by the observed
- * architecture (separate Exo/VLC engines); it does not copy XCIPTV source code.
+ * RAW streams stay in a dedicated process, but the lower information card now
+ * follows the same ULAK visual hierarchy as the normal Media3 player.
  */
 class RawVlcPlayerActivity : ComponentActivity() {
 
@@ -36,9 +33,10 @@ class RawVlcPlayerActivity : ComponentActivity() {
     }
 
     private lateinit var videoLayout: VLCVideoLayout
-    private lateinit var statusText: TextView
-    private lateinit var detailText: TextView
     private lateinit var overlay: LinearLayout
+    private lateinit var liveStateText: TextView
+    private lateinit var routeText: TextView
+    private lateinit var errorText: TextView
 
     private var libVlc: LibVLC? = null
     private var mediaPlayer: MediaPlayer? = null
@@ -77,40 +75,104 @@ class RawVlcPlayerActivity : ComponentActivity() {
             keepScreenOn = true
             isFocusable = false
         }
-        root.addView(videoLayout, FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT
-        ))
-
-        overlay = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(dp(22), dp(16), dp(22), dp(16))
-            setBackgroundColor(0xD914171A.toInt())
-        }
+        root.addView(
+            videoLayout,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
 
         val name = intent.getStringExtra(EXTRA_NAME).orEmpty().ifBlank { "RAW Kanal" }
-        val group = intent.getStringExtra(EXTRA_GROUP).orEmpty().ifBlank { "RAW" }
+        val group = intent.getStringExtra(EXTRA_GROUP).orEmpty().ifBlank { "Canlı TV" }
 
+        overlay = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(20), dp(18), dp(20), dp(18))
+            background = roundedBackground(0xF20B0D0F.toInt(), 22f, 0xFF2A2F35.toInt())
+        }
+
+        val logoBox = FrameLayout(this).apply {
+            background = roundedBackground(0xFF101214.toInt(), 18f, 0xFF272B30.toInt())
+        }
+        val initials = TextView(this).apply {
+            text = name.take(2).uppercase()
+            setTextColor(0xFFF4B400.toInt())
+            textSize = 18f
+            setTypeface(typeface, Typeface.BOLD)
+            gravity = Gravity.CENTER
+        }
+        logoBox.addView(
+            initials,
+            FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        )
+        overlay.addView(logoBox, LinearLayout.LayoutParams(dp(78), dp(78)))
+
+        val info = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), 0, dp(18), 0)
+        }
         val title = TextView(this).apply {
             text = name
             setTextColor(Color.WHITE)
-            textSize = 22f
-            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            textSize = 25f
+            setTypeface(typeface, Typeface.BOLD)
+            maxLines = 1
         }
-        statusText = TextView(this).apply {
-            text = "RAW VLC motoru hazırlanıyor…"
-            setTextColor(0xFFF4B400.toInt())
-            textSize = 14f
+        liveStateText = TextView(this).apply {
+            text = "● Canlı yayın   •   Stabil   •   RAW VLC"
+            setTextColor(0xFF69E58B.toInt())
+            textSize = 13f
+            setTypeface(typeface, Typeface.BOLD)
         }
-        detailText = TextView(this).apply {
-            text = "$group • VLC tam TS demux + codec zinciri\nBACK: geri • OK: bilgi • ←/→: alternatif yayın yolu"
-            setTextColor(0xFFD0D4D8.toInt())
+        val groupText = TextView(this).apply {
+            text = group
+            setTextColor(0xFF9AA0A6.toInt())
             textSize = 12f
         }
+        routeText = TextView(this).apply {
+            text = "VLC tam TS demux + MPEG Audio • yol 1/${urls.size}"
+            setTextColor(0xFF9AA0A6.toInt())
+            textSize = 10f
+        }
+        errorText = TextView(this).apply {
+            text = ""
+            setTextColor(0xFFFF8A80.toInt())
+            textSize = 10f
+            maxLines = 1
+            visibility = View.GONE
+        }
+        info.addView(title)
+        info.addView(liveStateText)
+        info.addView(groupText)
+        info.addView(routeText)
+        info.addView(errorText)
+        overlay.addView(
+            info,
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        )
 
-        overlay.addView(title)
-        overlay.addView(statusText)
-        overlay.addView(detailText)
+        val hints = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
+        }
+        listOf(
+            "← Önceki yol",
+            "→ Sonraki yol",
+            "OK Bilgiyi gizle"
+        ).forEachIndexed { index, value ->
+            hints.addView(TextView(this).apply {
+                text = value
+                setTextColor(if (index == 2) 0xFFF4B400.toInt() else Color.WHITE)
+                textSize = if (index == 2) 10f else 11f
+                gravity = Gravity.END
+            })
+        }
+        overlay.addView(hints)
 
         val lp = FrameLayout.LayoutParams(
             FrameLayout.LayoutParams.MATCH_PARENT,
@@ -126,11 +188,6 @@ class RawVlcPlayerActivity : ComponentActivity() {
 
     private fun startEngine() {
         if (libVlc != null) return
-
-        // Keep the option set conservative. The previous crash happened while
-        // attaching/detaching VLC from a Compose AndroidView, not because a
-        // special codec option was required. VLC already includes MPEG audio
-        // demux/decoding internally.
         libVlc = LibVLC(
             applicationContext,
             arrayListOf(
@@ -145,10 +202,10 @@ class RawVlcPlayerActivity : ComponentActivity() {
             player.setEventListener { event ->
                 runOnUiThread {
                     when (event.type) {
-                        MediaPlayer.Event.Opening -> updateStatus("Kaynak açılıyor…")
-                        MediaPlayer.Event.Buffering -> updateStatus("Yükleniyor… ${event.buffering.toInt()}%")
-                        MediaPlayer.Event.Playing -> updateStatus("Canlı yayın • RAW VLC • yol ${urlIndex + 1}/${urls.size}")
-                        MediaPlayer.Event.Vout -> updateStatus("Canlı yayın • görüntü çıkışı aktif • yol ${urlIndex + 1}/${urls.size}")
+                        MediaPlayer.Event.Opening -> updateState("● Kaynak açılıyor…", 0xFFF4B400.toInt())
+                        MediaPlayer.Event.Buffering -> updateState("● Yükleniyor… ${event.buffering.toInt()}%", 0xFFF4B400.toInt())
+                        MediaPlayer.Event.Playing -> updatePlayingState()
+                        MediaPlayer.Event.Vout -> updatePlayingState()
                         MediaPlayer.Event.EndReached -> tryNext("Yayın sona erdi")
                         MediaPlayer.Event.EncounteredError -> tryNext("VLC yayın hatası")
                     }
@@ -157,22 +214,32 @@ class RawVlcPlayerActivity : ComponentActivity() {
         }
     }
 
+    private fun updatePlayingState() {
+        liveStateText.text = "● Canlı yayın   •   Stabil   •   RAW VLC"
+        liveStateText.setTextColor(0xFF69E58B.toInt())
+        routeText.text = "VLC tam TS demux + MPEG Audio • yol ${urlIndex + 1}/${urls.size}"
+        errorText.visibility = View.GONE
+        showOverlay(true)
+    }
+
+    private fun updateState(value: String, color: Int) {
+        liveStateText.text = value
+        liveStateText.setTextColor(color)
+        routeText.text = "RAW VLC • yol ${urlIndex + 1}/${urls.size}"
+        showOverlay(true)
+    }
+
     private fun playCurrent() {
         val engine = libVlc ?: return
         val player = mediaPlayer ?: return
         if (urlIndex !in urls.indices) return
 
         runCatching { player.stop() }
-        val url = urls[urlIndex]
-        updateStatus("RAW VLC başlatılıyor • yol ${urlIndex + 1}/${urls.size}")
-
-        val media = Media(engine, Uri.parse(url)).apply {
-            // Let VLC choose hardware video decode where safe, while keeping its
-            // own demux/audio pipeline for MPEG-1/2 Audio.
+        updateState("● RAW VLC başlatılıyor…", 0xFFF4B400.toInt())
+        val media = Media(engine, Uri.parse(urls[urlIndex])).apply {
             setHWDecoderEnabled(true, false)
             addOption(":network-caching=1000")
             addOption(":http-user-agent=VLC/3.0.18 LibVLC/3.0.18")
-            addOption(":http-referrer=")
         }
         player.media = media
         media.release()
@@ -181,19 +248,18 @@ class RawVlcPlayerActivity : ComponentActivity() {
 
     private fun tryNext(reason: String) {
         if (urlIndex + 1 < urls.size) {
+            errorText.text = "$reason • alternatif yol deneniyor"
+            errorText.visibility = View.VISIBLE
             urlIndex++
-            updateStatus("$reason • alternatif yol deneniyor")
             playCurrent()
         } else {
-            updateStatus("$reason • tüm yollar denendi")
-            detailText.text = "RAW VLC motoru tüm ${urls.size} yayın yolunu denedi. BACK ile kanal listesine dön."
+            liveStateText.text = "● Yayın açılamadı"
+            liveStateText.setTextColor(0xFFFF8A80.toInt())
+            routeText.text = "RAW VLC • tüm ${urls.size} yayın yolu denendi"
+            errorText.text = reason
+            errorText.visibility = View.VISIBLE
             showOverlay(true)
         }
-    }
-
-    private fun updateStatus(value: String) {
-        statusText.text = value
-        showOverlay(true)
     }
 
     private fun showOverlay(show: Boolean) {
@@ -231,8 +297,6 @@ class RawVlcPlayerActivity : ComponentActivity() {
     }
 
     override fun onStop() {
-        // A dedicated player Activity owns VLC completely. Stop playback before
-        // the surface disappears to avoid native view races.
         runCatching { mediaPlayer?.stop() }
         super.onStop()
     }
@@ -255,6 +319,14 @@ class RawVlcPlayerActivity : ComponentActivity() {
         libVlc = null
         runCatching { engine?.release() }
     }
+
+    private fun roundedBackground(fill: Int, radiusDp: Float, stroke: Int): GradientDrawable =
+        GradientDrawable().apply {
+            shape = GradientDrawable.RECTANGLE
+            setColor(fill)
+            cornerRadius = dp(radiusDp.toInt()).toFloat()
+            setStroke(dp(1), stroke)
+        }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }
