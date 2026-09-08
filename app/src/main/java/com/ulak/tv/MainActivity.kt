@@ -50,6 +50,7 @@ import androidx.tv.material3.MaterialTheme
 import coil.compose.AsyncImage
 import com.ulak.tv.data.m3u.M3uRepository
 import com.ulak.tv.data.FavoritesStore
+import com.ulak.tv.data.PlaybackRouteStore
 import com.ulak.tv.data.favoriteKey
 import com.ulak.tv.data.model.Channel
 import com.ulak.tv.data.xtream.XtreamProfileStore
@@ -88,12 +89,17 @@ private fun isRawChannel(channel: Channel): Boolean =
         (channel.group?.contains("RAW", ignoreCase = true) == true)
 
 private fun launchRawVlcPlayer(context: android.content.Context, channel: Channel) {
-    val urls = playbackCandidates(channel).take(8).toTypedArray()
+    val routeStore = PlaybackRouteStore(context.applicationContext)
+    val base = playbackCandidates(channel)
+    val preferred = routeStore.preferred(channel)
+    val ordered = if (!preferred.isNullOrBlank() && preferred in base) listOf(preferred) + base.filter { it != preferred } else base
+    val urls = ordered.take(8).toTypedArray()
     val intent = Intent(context, RawVlcPlayerActivity::class.java).apply {
         putExtra(RawVlcPlayerActivity.EXTRA_NAME, channel.name)
         putExtra(RawVlcPlayerActivity.EXTRA_GROUP, channel.group ?: "RAW")
         putExtra(RawVlcPlayerActivity.EXTRA_LOGO, channel.logoUrl)
         putExtra(RawVlcPlayerActivity.EXTRA_URLS, urls)
+        putExtra(RawVlcPlayerActivity.EXTRA_STREAM_ID, channel.streamId ?: -1L)
     }
     context.startActivity(intent)
 }
@@ -139,12 +145,22 @@ fun UlakApp() {
     }
 
     if (screen is Screen.Player) {
-        PlayerScreen(channels = channels, initialIndex = (screen as Screen.Player).index, onBack = { screen = playerBackScreen })
+        PlayerScreen(
+            channels = channels,
+            initialIndex = (screen as Screen.Player).index,
+            onBack = { screen = playerBackScreen },
+            onFavoriteChanged = { ch -> favoritesStore.toggle(ch); favoriteIds = favoritesStore.ids() }
+        )
         return
     }
     if (screen is Screen.ProbePlayer) {
         val probe = (screen as Screen.ProbePlayer).channel
-        PlayerScreen(channels = listOf(probe), initialIndex = 0, onBack = { screen = Screen.StreamDiagnostics })
+        PlayerScreen(
+            channels = listOf(probe),
+            initialIndex = 0,
+            onBack = { screen = Screen.StreamDiagnostics },
+            onFavoriteChanged = { }
+        )
         return
     }
 
@@ -329,7 +345,7 @@ private fun Header(profileName: String?) {
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(profileName ?: "Profil yok", color = if (profileName != null) Color.White else Muted, fontSize = 13.sp)
-            Text("v0.3.5.2", color = Muted, fontSize = 12.sp)
+            Text("v0.3.7", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -1112,7 +1128,12 @@ private fun TechnicalLine(label: String, value: String) {
 
 @OptIn(UnstableApi::class)
 @Composable
-private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () -> Unit) {
+private fun PlayerScreen(
+    channels: List<Channel>,
+    initialIndex: Int,
+    onBack: () -> Unit,
+    onFavoriteChanged: (Channel) -> Unit
+) {
     val context = LocalContext.current
     if (channels.isEmpty()) {
         BackHandler(onBack = onBack)
@@ -1146,13 +1167,27 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     var psiAnalysis by remember { mutableStateOf<TsPsiAnalyzer.Analysis?>(null) }
     var psiStatus by remember { mutableStateOf("Bekleniyor") }
     val playerScope = rememberCoroutineScope()
+    val routeStore = remember { PlaybackRouteStore(context.applicationContext) }
+    val profileStore = remember { XtreamProfileStore(context.applicationContext) }
+    var previousIndex by remember { mutableIntStateOf(-1) }
+    var epgNow by remember { mutableStateOf<String?>(null) }
+    var epgNext by remember { mutableStateOf<String?>(null) }
+    var videoFps by remember { mutableStateOf<Float?>(null) }
+    var bufferStartedAt by remember { mutableStateOf<Long?>(null) }
+    var lastBufferMs by remember { mutableStateOf(0L) }
+    var reconnectCount by remember { mutableIntStateOf(0) }
+    var favoriteMessage by remember { mutableStateOf<String?>(null) }
+    var centerPressActive by remember { mutableStateOf(false) }
+    var centerLongTriggered by remember { mutableStateOf(false) }
+    val volumePrefs = remember { context.getSharedPreferences("ulak_player_prefs", android.content.Context.MODE_PRIVATE) }
+    var playerVolume by remember { mutableFloatStateOf(volumePrefs.getFloat("volume", 1.0f).coerceIn(0f, 1f)) }
 
     // Keep the default ExoPlayer renderer/buffer behavior, but use an HTTP
     // data source with TV-friendly request headers. Some IPTV servers reject
     // generic/empty user agents even when the account itself is valid.
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.5.2")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.7")
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(
                 mapOf(
@@ -1178,6 +1213,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         ExoPlayer.Builder(context, renderersFactory)
             .setMediaSourceFactory(mediaSourceFactory)
             .build()
+            .apply { volume = playerVolume }
     }
 
     // Software-decoder capable fallback engine. It is activated only when
@@ -1221,9 +1257,12 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
             }
             detectedVideoCodec = codec
             val size = if (vf.width > 0 && vf.height > 0) "${vf.width}×${vf.height}" else "çözünürlük ?"
-            "Video: $codec • $size"
+            videoFps = vf.frameRate.takeIf { it > 0f }
+            val fpsPart = videoFps?.let { " • ${if (it % 1f == 0f) it.toInt().toString() else "%.2f".format(it)} FPS" }.orEmpty()
+            "Video: $codec • $size$fpsPart"
         } else {
             detectedVideoCodec = "ALGILANMADI"
+            videoFps = null
             "Video: algılanmadı"
         }
     }
@@ -1259,6 +1298,33 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         }
     }
 
+    fun orderedCandidates(ch: Channel): List<String> {
+        val base = playbackCandidates(ch)
+        val preferred = routeStore.preferred(ch)
+        return if (!preferred.isNullOrBlank() && preferred in base) listOf(preferred) + base.filter { it != preferred } else base
+    }
+
+    fun adjustPlayerVolume(delta: Float) {
+        playerVolume = (playerVolume + delta).coerceIn(0f, 1f)
+        player.volume = playerVolume
+        volumePrefs.edit().putFloat("volume", playerVolume).apply()
+        favoriteMessage = if (playerVolume <= 0.001f) "Ses kapalı" else "Ses %${(playerVolume * 100).toInt()}"
+        showOverlay()
+        playerScope.launch { delay(1300); favoriteMessage = null }
+    }
+
+    fun toggleFavoriteShortcut() {
+        val ch = channels[currentIndex]
+        onFavoriteChanged(ch)
+        val isNowFavorite = FavoritesStore(context.applicationContext).isFavorite(ch)
+        favoriteMessage = if (isNowFavorite) "★ Favorilere eklendi" else "☆ Favorilerden çıkarıldı"
+        showOverlay()
+        playerScope.launch {
+            delay(1700)
+            favoriteMessage = null
+        }
+    }
+
     fun playUrl(url: String) {
         playbackGeneration++
         if (useVlc) {
@@ -1276,6 +1342,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         activeUrl = url
         playbackError = null
         status = "Yayın hazırlanıyor…"
+        bufferStartedAt = null
         audioInfo = "Ses: bekleniyor"
         videoInfo = "Video: bekleniyor"
         player.stop()
@@ -1310,16 +1377,37 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
             index > channels.lastIndex -> 0
             else -> index
         }
+        if (isRawChannel(channels[normalized])) {
+            previousIndex = currentIndex
+            player.stop()
+            player.clearMediaItems()
+            onBack()
+            launchRawVlcPlayer(context, channels[normalized])
+            return
+        }
         if (useVlc) {
             runCatching { vlcPlayer.stop() }
             runCatching { vlcPlayer.detachViews() }
             useVlc = false
         }
+        if (normalized != currentIndex) previousIndex = currentIndex
         currentIndex = normalized
-        candidates = playbackCandidates(channels[normalized])
+        candidates = orderedCandidates(channels[normalized])
         candidateIndex = 0
+        reconnectCount = 0
         attemptLog = emptyList()
         playUrl(candidates.first())
+    }
+
+    fun goLastChannel() {
+        if (previousIndex !in channels.indices || previousIndex == currentIndex) {
+            favoriteMessage = "Önceki kanal yok"
+            showOverlay()
+            playerScope.launch { delay(1300); favoriteMessage = null }
+            return
+        }
+        val target = previousIndex
+        tuneTo(target)
     }
 
     fun tryNextCandidate(reason: String): Boolean {
@@ -1343,17 +1431,65 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
     }
 
     LaunchedEffect(Unit) {
-        candidates = playbackCandidates(channel)
+        candidates = orderedCandidates(channel)
         candidateIndex = 0
         playUrl(candidates.first())
+    }
+
+    LaunchedEffect(currentIndex) {
+        epgNow = null
+        epgNext = null
+        val ch = channels[currentIndex]
+        val streamId = ch.streamId ?: return@LaunchedEffect
+        val profile = profileStore.load() ?: return@LaunchedEffect
+        XtreamRepository.loadShortEpg(profile.server, profile.username, profile.password, streamId)
+            .onSuccess { entries ->
+                val nowSec = System.currentTimeMillis() / 1000L
+                val current = entries.firstOrNull { e ->
+                    val start = e.startTimestamp ?: Long.MIN_VALUE
+                    val stop = e.stopTimestamp ?: Long.MAX_VALUE
+                    nowSec in start until stop
+                } ?: entries.firstOrNull()
+                val next = current?.let { c -> entries.dropWhile { it != c }.drop(1).firstOrNull() }
+                    ?: entries.drop(1).firstOrNull()
+                epgNow = current?.title
+                epgNext = next?.title
+            }
+    }
+
+    LaunchedEffect(status, playbackGeneration) {
+        if (status.startsWith("Yükleniyor")) {
+            val generation = playbackGeneration
+            delay(12_000)
+            if (generation == playbackGeneration && status.startsWith("Yükleniyor") && !useVlc) {
+                if (reconnectCount < 1) {
+                    reconnectCount++
+                    attemptLog = attemptLog + "Buffer: 12 sn aşıldı • aynı kaynak yeniden bağlanıyor"
+                    status = "Yeniden bağlanıyor…"
+                    playUrl(activeUrl)
+                } else {
+                    reconnectCount = 0
+                    tryNextCandidate("Buffer 12 sn aşıldı")
+                }
+            }
+        }
     }
 
     DisposableEffect(player) {
         val listener = object : Player.Listener {
             override fun onPlaybackStateChanged(playbackState: Int) {
                 status = when (playbackState) {
-                    Player.STATE_BUFFERING -> "Yükleniyor…"
-                    Player.STATE_READY -> "Canlı yayın"
+                    Player.STATE_BUFFERING -> {
+                        if (bufferStartedAt == null) bufferStartedAt = android.os.SystemClock.elapsedRealtime()
+                        "Yükleniyor…"
+                    }
+                    Player.STATE_READY -> {
+                        bufferStartedAt?.let { lastBufferMs = android.os.SystemClock.elapsedRealtime() - it }
+                        bufferStartedAt = null
+                        reconnectCount = 0
+                        routeStore.markWorking(channels[currentIndex], activeUrl)
+                        "Canlı yayın"
+                    }
                     Player.STATE_ENDED -> "Yayın sona erdi"
                     else -> status
                 }
@@ -1481,6 +1617,44 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
         }
     }
 
+    fun handlePlayerKey(event: androidx.compose.ui.input.key.KeyEvent): Boolean {
+        val native = event.nativeKeyEvent
+        val code = native.keyCode
+        if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER) {
+            if (native.action == KeyEvent.ACTION_DOWN && !centerPressActive) {
+                centerPressActive = true
+                centerLongTriggered = false
+                playerScope.launch {
+                    delay(650)
+                    if (centerPressActive) {
+                        centerLongTriggered = true
+                        toggleFavoriteShortcut()
+                    }
+                }
+                return true
+            }
+            if (native.action == KeyEvent.ACTION_UP) {
+                centerPressActive = false
+                if (!centerLongTriggered) toggleTechnical()
+                centerLongTriggered = false
+                return true
+            }
+            return true
+        }
+        if (native.action != KeyEvent.ACTION_DOWN) return false
+        return when (code) {
+            KeyEvent.KEYCODE_BACK -> { onBack(); true }
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { tuneTo(currentIndex - 1); true }
+            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> { tuneTo(currentIndex + 1); true }
+            KeyEvent.KEYCODE_DPAD_LEFT -> { adjustPlayerVolume(-0.05f); true }
+            KeyEvent.KEYCODE_DPAD_RIGHT -> { adjustPlayerVolume(0.05f); true }
+            KeyEvent.KEYCODE_LAST_CHANNEL, KeyEvent.KEYCODE_MEDIA_PREVIOUS -> { goLastChannel(); true }
+            KeyEvent.KEYCODE_PROG_RED, KeyEvent.KEYCODE_BOOKMARK -> { toggleFavoriteShortcut(); true }
+            KeyEvent.KEYCODE_INFO, KeyEvent.KEYCODE_MENU -> { overlayVisible = !overlayVisible; true }
+            else -> false
+        }
+    }
+
     BackHandler(onBack = onBack)
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         if (useVlc) {
@@ -1489,17 +1663,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                     modifier = Modifier
                         .fillMaxSize()
                         .focusable()
-                        .onKeyEvent { event ->
-                            if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
-                            when (event.nativeKeyEvent.keyCode) {
-                                KeyEvent.KEYCODE_BACK -> { onBack(); true }
-                                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { tuneTo(currentIndex - 1); true }
-                                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> { tuneTo(currentIndex + 1); true }
-                                KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { toggleTechnical(); true }
-                                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> { showOverlay(); true }
-                                else -> false
-                            }
-                        },
+                        .onKeyEvent { event -> handlePlayerKey(event) },
                     factory = { ctx ->
                         VLCVideoLayout(ctx).apply {
                             keepScreenOn = true
@@ -1511,6 +1675,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                                     VlcMediaPlayer.Event.Playing -> {
                                         vlcStatus = "VLC oynatıyor"
                                         status = "Canlı yayın • VLC"
+                                        routeStore.markWorking(channels[currentIndex], activeUrl)
                                         smartDecision = "LibVLC • uyumluluk motoru aktif"
                                         videoInfo = "Video: VLC yazılım/uyumluluk motoru"
                                     }
@@ -1535,7 +1700,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             val media = Media(libVlc, Uri.parse(activeUrl)).apply {
                                 setHWDecoderEnabled(true, false)
                                 addOption(":network-caching=1500")
-                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.5.2")
+                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.7")
                             }
                             vlcPlayer.media = media
                             media.release()
@@ -1549,17 +1714,7 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                 modifier = Modifier
                     .fillMaxSize()
                     .focusable()
-                    .onKeyEvent { event ->
-                        if (event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
-                        when (event.nativeKeyEvent.keyCode) {
-                            KeyEvent.KEYCODE_BACK -> { onBack(); true }
-                            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_CHANNEL_UP -> { tuneTo(currentIndex - 1); true }
-                            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_CHANNEL_DOWN -> { tuneTo(currentIndex + 1); true }
-                            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { toggleTechnical(); true }
-                            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> { showOverlay(); true }
-                            else -> false
-                        }
-                    },
+                    .onKeyEvent { event -> handlePlayerKey(event) },
                 factory = { ctx ->
                     PlayerView(ctx).apply {
                         this.player = player
@@ -1625,15 +1780,26 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                             Text(streamType(activeUrl), color = Gold, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                         Text(channel.group ?: "Canlı TV", color = Muted, fontSize = 12.sp)
+                        epgNow?.let { Text("Şimdi: $it", color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        epgNext?.let { Text("Sırada: $it", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+                        if (videoFps != null || player.videoFormat != null) {
+                            val vf = player.videoFormat
+                            val res = if (vf != null && vf.width > 0 && vf.height > 0) "${vf.width}×${vf.height}" else null
+                            val fps = videoFps?.let { if (it % 1f == 0f) "${it.toInt()} FPS" else "%.2f FPS".format(it) }
+                            Text(listOfNotNull(res, fps).joinToString(" • "), color = Muted, fontSize = 10.sp)
+                        }
+                        favoriteMessage?.let { Text(it, color = Gold, fontSize = 10.sp, fontWeight = FontWeight.SemiBold) }
                         if (candidateIndex > 0) {
                             Text("Uyumluluk modu • ${candidateIndex + 1}/${candidates.size}", color = Muted, fontSize = 10.sp)
                         }
                         playbackError?.let { Text(it, color = Color(0xFFFF8A80), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                     }
                     Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Text("↑ Önceki", color = Color.White, fontSize = 11.sp)
-                        Text("↓ Sonraki", color = Color.White, fontSize = 11.sp)
-                        Text(if (technicalVisible) "OK Detayları gizle" else "OK Teknik bilgi", color = Gold, fontSize = 10.sp)
+                        Text("↑ Önceki kanal", color = Color.White, fontSize = 11.sp)
+                        Text("↓ Sonraki kanal", color = Color.White, fontSize = 11.sp)
+                        Text("← Ses -   Ses + →", color = Color.White, fontSize = 10.sp)
+                        Text("OK Teknik bilgi • Uzun OK ★ Favori", color = Gold, fontSize = 10.sp)
+                        Text("⏮ Son kanal", color = Muted, fontSize = 9.sp)
                     }
                 }
 
@@ -1650,6 +1816,10 @@ private fun PlayerScreen(channels: List<Channel>, initialIndex: Int, onBack: () 
                         Spacer(Modifier.height(2.dp))
                         TechnicalLine("Video", videoInfo.removePrefix("Video: "))
                         TechnicalLine("Codec", detectedVideoCodec)
+                        TechnicalLine("FPS", videoFps?.let { "%.2f".format(it) } ?: "-")
+                        TechnicalLine("Son buffer", if (lastBufferMs > 0) "${lastBufferMs / 1000.0} sn" else "-")
+                        TechnicalLine("EPG şimdi", epgNow ?: "yok")
+                        TechnicalLine("EPG sırada", epgNext ?: "yok")
                         TechnicalLine("Ses", audioInfo.removePrefix("Ses: "))
                         TechnicalLine("Audio track", if (useVlc) "VLC motorunda" else if (player.audioFormat != null) "1 • var" else "0 • yok")
                         TechnicalLine("PSI / PMT", psiStatus)

@@ -11,6 +11,49 @@ import java.net.URLEncoder
 
 object XtreamRepository {
 
+    data class EpgEntry(
+        val title: String,
+        val description: String?,
+        val startTimestamp: Long?,
+        val stopTimestamp: Long?
+    )
+
+    suspend fun loadShortEpg(
+        serverUrl: String,
+        username: String,
+        password: String,
+        streamId: Long,
+        limit: Int = 4
+    ): Result<List<EpgEntry>> = withContext(Dispatchers.IO) {
+        runCatching {
+            val server = normalizeServer(serverUrl)
+            val base = apiUrl(server, username, password, "get_short_epg")
+            val url = "$base&stream_id=$streamId&limit=${limit.coerceIn(2, 10)}"
+            val root = getJsonObject(url)
+            val listings = root.optJSONArray("epg_listings") ?: JSONArray()
+            buildList {
+                for (i in 0 until listings.length()) {
+                    val item = listings.optJSONObject(i) ?: continue
+                    fun decodeMaybeBase64(value: String): String {
+                        if (value.isBlank()) return value
+                        return runCatching {
+                            val bytes = android.util.Base64.decode(value, android.util.Base64.DEFAULT)
+                            val decoded = String(bytes, Charsets.UTF_8)
+                            if (decoded.any { it.isLetterOrDigit() }) decoded else value
+                        }.getOrDefault(value)
+                    }
+                    val title = decodeMaybeBase64(item.optString("title")).ifBlank { "Program bilgisi yok" }
+                    val desc = decodeMaybeBase64(item.optString("description")).takeIf { it.isNotBlank() }
+                    val start = item.optLong("start_timestamp", 0L).takeIf { it > 0L }
+                        ?: item.optLong("start", 0L).takeIf { it > 0L }
+                    val stop = item.optLong("stop_timestamp", 0L).takeIf { it > 0L }
+                        ?: item.optLong("end", 0L).takeIf { it > 0L }
+                    add(EpgEntry(title, desc, start, stop))
+                }
+            }
+        }
+    }
+
     data class StreamProbeResult(
         val label: String,
         val url: String,
@@ -47,7 +90,7 @@ object XtreamRepository {
                 readTimeout = 10_000
                 requestMethod = "GET"
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "ULAK/0.3.5 AndroidTV")
+                setRequestProperty("User-Agent", "ULAK/0.3.7 AndroidTV")
                 setRequestProperty("Accept", "*/*")
                 setRequestProperty("Connection", "keep-alive")
                 setRequestProperty("Range", "bytes=0-2047")
@@ -280,7 +323,7 @@ object XtreamRepository {
             readTimeout = 30_000
             instanceFollowRedirects = true
             requestMethod = "GET"
-            setRequestProperty("User-Agent", "ULAK/0.3.5 AndroidTV")
+            setRequestProperty("User-Agent", "ULAK/0.3.7 AndroidTV")
             setRequestProperty("Accept", "application/json, */*")
         }
         return try {
