@@ -90,7 +90,7 @@ object XtreamRepository {
                 readTimeout = 10_000
                 requestMethod = "GET"
                 instanceFollowRedirects = true
-                setRequestProperty("User-Agent", "ULAK/0.3.7 AndroidTV")
+                setRequestProperty("User-Agent", "ULAK/0.3.9 AndroidTV")
                 setRequestProperty("Accept", "*/*")
                 setRequestProperty("Connection", "keep-alive")
                 setRequestProperty("Range", "bytes=0-2047")
@@ -242,16 +242,18 @@ object XtreamRepository {
                     livePrefix = false
                 )
 
-                // Prefer the account-advertised HLS form when available, because it
-                // rendered correctly on channels that regressed when v0.1.5 forced TS.
-                // Keep both /live and rewrite URL forms as fallbacks.
+                // v0.3.9 Xtream Direct Stream:
+                // 1) If the provider explicitly supplies direct_source, use it first.
+                // 2) Otherwise use the canonical Xtream /live/.../STREAM_ID.ts URL directly.
+                // 3) Alternative forms are retained strictly as failure fallbacks; they are
+                //    not probed before normal playback.
                 val candidates = buildList {
                     if (directSource != null) add(directSource)
-                    if (extension.equals("m3u8", true)) {
-                        add(hlsUrl); add(hlsRewriteUrl); add(tsUrl); add(tsRewriteUrl)
-                    } else {
-                        add(tsUrl); add(tsRewriteUrl); add(hlsUrl); add(hlsRewriteUrl)
-                    }
+                    add(tsUrl)
+                    if (extension.equals("m3u8", true)) add(hlsUrl)
+                    add(tsRewriteUrl)
+                    if (!extension.equals("m3u8", true)) add(hlsUrl)
+                    add(hlsRewriteUrl)
                 }.distinct()
 
                 channels += Channel(
@@ -323,7 +325,7 @@ object XtreamRepository {
             readTimeout = 30_000
             instanceFollowRedirects = true
             requestMethod = "GET"
-            setRequestProperty("User-Agent", "ULAK/0.3.7 AndroidTV")
+            setRequestProperty("User-Agent", "ULAK/0.3.9 AndroidTV")
             setRequestProperty("Accept", "application/json, */*")
         }
         return try {

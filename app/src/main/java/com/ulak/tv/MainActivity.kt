@@ -345,7 +345,7 @@ private fun Header(profileName: String?) {
         }
         Column(horizontalAlignment = Alignment.End) {
             Text(profileName ?: "Profil yok", color = if (profileName != null) Color.White else Muted, fontSize = 13.sp)
-            Text("v0.3.7", color = Muted, fontSize = 12.sp)
+            Text("v0.3.8", color = Muted, fontSize = 12.sp)
         }
     }
 }
@@ -1118,6 +1118,9 @@ private fun safeError(error: PlaybackException): String {
 }
 
 
+private fun formatEpgClock(epochSeconds: Long): String =
+    java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(epochSeconds * 1000L))
+
 @Composable
 private fun TechnicalLine(label: String, value: String) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1172,6 +1175,10 @@ private fun PlayerScreen(
     var previousIndex by remember { mutableIntStateOf(-1) }
     var epgNow by remember { mutableStateOf<String?>(null) }
     var epgNext by remember { mutableStateOf<String?>(null) }
+    var epgStart by remember { mutableStateOf<Long?>(null) }
+    var epgStop by remember { mutableStateOf<Long?>(null) }
+    var epgNextStart by remember { mutableStateOf<Long?>(null) }
+    var clockTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var videoFps by remember { mutableStateOf<Float?>(null) }
     var bufferStartedAt by remember { mutableStateOf<Long?>(null) }
     var lastBufferMs by remember { mutableStateOf(0L) }
@@ -1187,7 +1194,7 @@ private fun PlayerScreen(
     // generic/empty user agents even when the account itself is valid.
     val player = remember {
         val httpFactory = DefaultHttpDataSource.Factory()
-            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.7")
+            .setUserAgent("Mozilla/5.0 (Linux; Android 11; Android TV) AppleWebKit/537.36 Chrome/120 Safari/537.36 ULAK/0.3.8")
             .setAllowCrossProtocolRedirects(true)
             .setDefaultRequestProperties(
                 mapOf(
@@ -1300,8 +1307,14 @@ private fun PlayerScreen(
 
     fun orderedCandidates(ch: Channel): List<String> {
         val base = playbackCandidates(ch)
+        if (base.isEmpty()) return base
+        // v0.3.9: never let route history replace Xtream's current primary source.
+        // A remembered working route may be tried second, but only after the direct source fails.
+        val primary = base.first()
         val preferred = routeStore.preferred(ch)
-        return if (!preferred.isNullOrBlank() && preferred in base) listOf(preferred) + base.filter { it != preferred } else base
+        return if (!preferred.isNullOrBlank() && preferred in base && preferred != primary) {
+            listOf(primary, preferred) + base.filter { it != primary && it != preferred }
+        } else base
     }
 
     fun adjustPlayerVolume(delta: Float) {
@@ -1439,6 +1452,9 @@ private fun PlayerScreen(
     LaunchedEffect(currentIndex) {
         epgNow = null
         epgNext = null
+        epgStart = null
+        epgStop = null
+        epgNextStart = null
         val ch = channels[currentIndex]
         val streamId = ch.streamId ?: return@LaunchedEffect
         val profile = profileStore.load() ?: return@LaunchedEffect
@@ -1454,7 +1470,17 @@ private fun PlayerScreen(
                     ?: entries.drop(1).firstOrNull()
                 epgNow = current?.title
                 epgNext = next?.title
+                epgStart = current?.startTimestamp
+                epgStop = current?.stopTimestamp
+                epgNextStart = next?.startTimestamp
             }
+    }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            clockTick = System.currentTimeMillis()
+            delay(30_000)
+        }
     }
 
     LaunchedEffect(status, playbackGeneration) {
@@ -1700,7 +1726,7 @@ private fun PlayerScreen(
                             val media = Media(libVlc, Uri.parse(activeUrl)).apply {
                                 setHWDecoderEnabled(true, false)
                                 addOption(":network-caching=1500")
-                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.7")
+                                addOption(":http-user-agent=Mozilla/5.0 (Linux; Android TV) ULAK/0.3.8")
                             }
                             vlcPlayer.media = media
                             media.release()
@@ -1780,15 +1806,43 @@ private fun PlayerScreen(
                             Text(streamType(activeUrl), color = Gold, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                         Text(channel.group ?: "Canlı TV", color = Muted, fontSize = 12.sp)
-                        epgNow?.let { Text("Şimdi: $it", color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                        epgNext?.let { Text("Sırada: $it", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis) }
-                        if (videoFps != null || player.videoFormat != null) {
+                        epgNow?.let { title ->
+                            val startText = epgStart?.let(::formatEpgClock)
+                            val stopText = epgStop?.let(::formatEpgClock)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("ŞİMDİ", color = Gold, fontSize = 9.sp, fontWeight = FontWeight.Bold)
+                                Text(title, color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                                if (startText != null && stopText != null) Text("$startText–$stopText", color = Muted, fontSize = 9.sp)
+                            }
+                            val start = epgStart
+                            val stop = epgStop
+                            if (start != null && stop != null && stop > start) {
+                                val nowSec = clockTick / 1000L
+                                val progress = ((nowSec - start).toFloat() / (stop - start).toFloat()).coerceIn(0f, 1f)
+                                Box(Modifier.fillMaxWidth(0.72f).height(3.dp).background(Color(0xFF30353B), RoundedCornerShape(2.dp))) {
+                                    Box(Modifier.fillMaxWidth(progress).fillMaxHeight().background(Gold, RoundedCornerShape(2.dp)))
+                                }
+                            }
+                        }
+                        epgNext?.let { title ->
+                            val nextTime = epgNextStart?.let(::formatEpgClock)?.let { "$it • " }.orEmpty()
+                            Text("SIRADA  $nextTime$title", color = Muted, fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             val vf = player.videoFormat
                             val res = if (vf != null && vf.width > 0 && vf.height > 0) "${vf.width}×${vf.height}" else null
                             val fps = videoFps?.let { if (it % 1f == 0f) "${it.toInt()} FPS" else "%.2f FPS".format(it) }
-                            Text(listOfNotNull(res, fps).joinToString(" • "), color = Muted, fontSize = 10.sp)
+                            listOfNotNull(res, fps).forEach { quality ->
+                                Text(quality, color = Color(0xFFCFD3D8), fontSize = 9.sp, modifier = Modifier.background(Color(0xFF22262B), RoundedCornerShape(7.dp)).padding(horizontal = 7.dp, vertical = 3.dp))
+                            }
+                            if (status.startsWith("Yükleniyor") || status.startsWith("Yeniden")) {
+                                CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 2.dp, color = Gold)
+                                Text(status, color = Gold, fontSize = 9.sp)
+                            }
                         }
-                        favoriteMessage?.let { Text(it, color = Gold, fontSize = 10.sp, fontWeight = FontWeight.SemiBold) }
+                        favoriteMessage?.let {
+                            Text(it, color = Gold, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.background(Color(0xFF2A2414), RoundedCornerShape(9.dp)).padding(horizontal = 9.dp, vertical = 4.dp))
+                        }
                         if (candidateIndex > 0) {
                             Text("Uyumluluk modu • ${candidateIndex + 1}/${candidates.size}", color = Muted, fontSize = 10.sp)
                         }
@@ -1817,7 +1871,8 @@ private fun PlayerScreen(
                         TechnicalLine("Video", videoInfo.removePrefix("Video: "))
                         TechnicalLine("Codec", detectedVideoCodec)
                         TechnicalLine("FPS", videoFps?.let { "%.2f".format(it) } ?: "-")
-                        TechnicalLine("Son buffer", if (lastBufferMs > 0) "${lastBufferMs / 1000.0} sn" else "-")
+                        TechnicalLine("Son buffer", if (lastBufferMs > 0) "%.1f sn".format(lastBufferMs / 1000.0) else "-")
+                        TechnicalLine("Yeniden bağlanma", reconnectCount.toString())
                         TechnicalLine("EPG şimdi", epgNow ?: "yok")
                         TechnicalLine("EPG sırada", epgNext ?: "yok")
                         TechnicalLine("Ses", audioInfo.removePrefix("Ses: "))

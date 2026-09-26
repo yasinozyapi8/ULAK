@@ -35,7 +35,7 @@ import org.videolan.libvlc.MediaPlayer
 import org.videolan.libvlc.util.VLCVideoLayout
 
 /**
- * v0.3.7 RAW player.
+ * v0.3.8 RAW player.
  *
  * RAW kanallar LibVLC motorunda oynatılmaya devam eder, ancak oynatma ekranı
  * artık normal ULAK Media3 oynatıcısıyla aynı alt bilgi hiyerarşisini kullanır.
@@ -110,6 +110,9 @@ class RawVlcPlayerActivity : ComponentActivity() {
     private var bufferWatchToken = 0
     private var epgNow: String? = null
     private var epgNext: String? = null
+    private var epgStart: Long? = null
+    private var epgStop: Long? = null
+    private var epgNextStart: Long? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -261,13 +264,13 @@ class RawVlcPlayerActivity : ComponentActivity() {
         }
         info.addView(groupText)
         nowText = TextView(this).apply {
-            text = "Şimdi: EPG yükleniyor…"
+            text = "ŞİMDİ  EPG yükleniyor…"
             setTextColor(Color.WHITE)
             textSize = 11f
             maxLines = 1
         }
         nextText = TextView(this).apply {
-            text = "Sırada: -"
+            text = "SIRADA  -"
             setTextColor(0xFF9AA0A6.toInt())
             textSize = 10f
             maxLines = 1
@@ -618,8 +621,13 @@ class RawVlcPlayerActivity : ComponentActivity() {
 
     private fun orderedUrls(channel: Channel): List<String> {
         val base = (listOf(channel.streamUrl) + channel.alternateStreamUrls).distinct()
+        if (base.isEmpty()) return base
+        // Same policy as Media3: Xtream primary first; remembered route is fallback only.
+        val primary = base.first()
         val preferred = routeStore.preferred(channel)
-        return if (!preferred.isNullOrBlank() && preferred in base) listOf(preferred) + base.filter { it != preferred } else base
+        return if (!preferred.isNullOrBlank() && preferred in base && preferred != primary) {
+            listOf(primary, preferred) + base.filter { it != primary && it != preferred }
+        } else base
     }
 
     private fun switchChannel(delta: Int) {
@@ -680,8 +688,11 @@ class RawVlcPlayerActivity : ComponentActivity() {
         technicalRoute.text = "Yol\n${urlIndex + 1}/${urls.size.coerceAtLeast(1)}"
         epgNow = null
         epgNext = null
-        nowText.text = "Şimdi: EPG yükleniyor…"
-        nextText.text = "Sırada: -"
+        epgStart = null
+        epgStop = null
+        epgNextStart = null
+        nowText.text = "ŞİMDİ  EPG yükleniyor…"
+        nextText.text = "SIRADA  -"
         updateFavoriteHint()
         showOverlay(true)
         if (!keepPlaying) scheduleOverlayHide()
@@ -719,8 +730,13 @@ class RawVlcPlayerActivity : ComponentActivity() {
                         if (currentChannel?.streamId != streamId) return@withContext
                         epgNow = current?.title
                         epgNext = next?.title
-                        nowText.text = "Şimdi: ${epgNow ?: "Bilgi yok"}"
-                        nextText.text = "Sırada: ${epgNext ?: "Bilgi yok"}"
+                        epgStart = current?.startTimestamp
+                        epgStop = current?.stopTimestamp
+                        epgNextStart = next?.startTimestamp
+                        val nowRange = if (epgStart != null && epgStop != null) " ${formatClock(epgStart!!)}–${formatClock(epgStop!!)}" else ""
+                        val nextAt = epgNextStart?.let { " ${formatClock(it)}" }.orEmpty()
+                        nowText.text = "ŞİMDİ$nowRange  ${epgNow ?: "Bilgi yok"}"
+                        nextText.text = "SIRADA$nextAt  ${epgNext ?: "Bilgi yok"}"
                         technicalEpg.text = "EPG\n${epgNow ?: "yok"} → ${epgNext ?: "yok"}"
                     }
                 }
@@ -728,7 +744,7 @@ class RawVlcPlayerActivity : ComponentActivity() {
                     withContext(Dispatchers.Main) {
                         if (currentChannel?.streamId == streamId) {
                             nowText.text = "Şimdi: EPG bilgisi yok"
-                            nextText.text = "Sırada: -"
+                            nextText.text = "SIRADA  -"
                             technicalEpg.text = "EPG\nyok"
                         }
                     }
@@ -831,6 +847,9 @@ class RawVlcPlayerActivity : ComponentActivity() {
             cornerRadius = dp(radiusDp.toInt()).toFloat()
             setStroke(dp(1), stroke)
         }
+
+    private fun formatClock(epochSeconds: Long): String =
+        java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date(epochSeconds * 1000L))
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 }
